@@ -24,7 +24,7 @@ struct AppShellView: View {
             .frame(minWidth: 360)
 
             if isChatVisible {
-                ChatPanelPlaceholder(
+                ChatPanel(
                     selectionText: selectionText,
                     onClose: { isChatVisible = false }
                 )
@@ -68,41 +68,6 @@ struct AppShellView: View {
     private func handleAskLLM(_ text: String) {
         selectionText = text
         isChatVisible = true
-    }
-}
-
-struct ChatPanelPlaceholder: View {
-    let selectionText: String
-    let onClose: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Chat Panel")
-                    .font(.title2)
-                Spacer()
-                Button("Close") {
-                    onClose()
-                }
-            }
-
-            Text("Selection context:")
-                .font(.headline)
-
-            ScrollView {
-                Text(selectionText.isEmpty ? "No selection provided." : selectionText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(Color.secondary.opacity(0.1))
-                    .cornerRadius(8)
-            }
-
-            Text("Chat UI will be implemented in chat-panel.swift.")
-                .foregroundColor(.secondary)
-
-            Spacer()
-        }
-        .padding(20)
     }
 }
 
