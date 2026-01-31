@@ -2,9 +2,9 @@
 
 ## Overview
 The LLM Service provides a streaming OpenAI GPT client for the macOS PoC. It
-exposes a small `LLMClient` protocol with mock and remote implementations,
-builds OpenAI Responses API requests, and emits incremental text deltas for the
-chat UI to render in real time.
+exposes a small `LLMClient` protocol with mock and OpenAI streaming
+implementations, builds OpenAI Responses API requests, and emits incremental
+text deltas for the chat UI to render in real time.
 
 ## Public API
 ```swift
