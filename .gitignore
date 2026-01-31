@@ -1,0 +1,46 @@
+# General macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode (macOS, iOS, iPadOS)
+build/
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+*.xcworkspace/*
+!*.xcworkspace/contents.xcworkspacedata
+xcuserdata/
+DerivedData/
+*.derivedData
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Rust (Backend)
+/target/
+**/*.rs.bk
+debug/
+release/
+# Cargo.lock is usually committed for applications (binaries) to ensure reproducible builds.
+# If you are building a library, you might want to ignore it by uncommenting below:
+# Cargo.lock
+
+# Editors & IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Vibe coding
+AGENTS.md
+DESIGN.md
+IMPL.md
+PLAN.md
