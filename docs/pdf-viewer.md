@@ -66,6 +66,6 @@ PDFViewer(fileURL: fileURL) { selection in
 ```swift
 HSplitView {
     PDFViewer(fileURL: fileURL, onAskLLM: handleAskLLM)
-    ChatPanelPlaceholder(selectionText: selectionText, onClose: closeChat)
+    ChatPanel(selectionText: selectionText, onClose: closeChat)
 }
 ```

@@ -20,7 +20,7 @@ struct LLMPaperReadingHelperApp: App {}
  * AppShellView - Main split view shell for macOS
  *
  * Owns UI state for selected PDF URL, selection text, and whether the chat
- * panel is visible. Hosts PDFViewer and the chat placeholders.
+ * panel is visible. Hosts PDFViewer and the chat panel.
  */
 struct AppShellView: View {}
 ```
@@ -33,8 +33,7 @@ struct AppShellView: View {}
 ## Integration Points
 - PDF rendering and selection are provided by `PDFViewer` from
   `src/macos/pdf-viewer.swift`.
-- Chat rendering will move from `ChatPanelPlaceholder` to the real chat panel
-  in `src/macos/chat-panel.swift`.
+- Chat rendering is provided by `ChatPanel` in `src/macos/chat-panel.swift`.
 - File import uses SwiftUI `fileImporter` with `UTType.pdf`.
 
 ## Usage Examples
@@ -44,9 +43,9 @@ AppShellView()
 ```
 
 ```swift
-// Example of wiring a custom PDF panel once implemented.
+// Example of wiring the PDF panel with the chat panel.
 HSplitView {
     PDFViewer(fileURL: fileURL, onAskLLM: handleAskLLM)
-    ChatPanel(selectionText: selectionText)
+    ChatPanel(selectionText: selectionText, onClose: closeChat)
 }
 ```
