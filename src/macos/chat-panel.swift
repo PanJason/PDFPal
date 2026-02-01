@@ -3,6 +3,7 @@ import SwiftUI
 struct ChatPanel: View {
     let documentId: String
     let selectionText: String
+    let openPDFPath: String?
     let onClose: () -> Void
     @ObservedObject var sessionStore: SessionStore
 
@@ -24,20 +25,19 @@ struct ChatPanel: View {
     init(
         documentId: String,
         selectionText: String,
+        openPDFPath: String?,
         sessionStore: SessionStore,
         onClose: @escaping () -> Void
     ) {
         self.documentId = documentId
         self.selectionText = selectionText
+        self.openPDFPath = openPDFPath
         self.sessionStore = sessionStore
         self.onClose = onClose
-        let session = sessionStore.activeSession ?? sessionStore.createSession(
-            contextText: selectionText,
-            model: LLMModel.defaultModel(for: sessionStore.provider)
-        )
-        _selectedModel = State(initialValue: session.selectedModel)
-        _customModelId = State(initialValue: session.customModelId)
-        _keyPromptModel = State(initialValue: session.selectedModel)
+        let session = sessionStore.activeSession
+        _selectedModel = State(initialValue: session?.selectedModel ?? LLMModel.defaultModel(for: sessionStore.provider))
+        _customModelId = State(initialValue: session?.customModelId ?? "")
+        _keyPromptModel = State(initialValue: session?.selectedModel ?? LLMModel.defaultModel(for: sessionStore.provider))
     }
 
     private var provider: LLMProvider {
@@ -441,6 +441,7 @@ struct ChatPanel: View {
             contextText: context,
             model: selectedModel,
             customModelId: customModelId,
+            openPDFPath: openPDFPath,
             activate: true
         )
     }
@@ -511,6 +512,7 @@ struct ChatPanel: View {
         try store.saveAPIKey(key)
         isShowingKeyPrompt = false
         updateKeyAvailability(for: keyPromptModel)
+        createSessionIfNeededAfterKeySave()
     }
 
     private func keyProvider(for model: LLMModel) -> any APIKeyProvider {
@@ -586,6 +588,18 @@ struct ChatPanel: View {
         DispatchQueue.main.async {
             proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
         }
+    }
+
+    private func createSessionIfNeededAfterKeySave() {
+        guard sessionStore.activeSession == nil else { return }
+        guard let openPDFPath, !openPDFPath.isEmpty else { return }
+        sessionStore.createSession(
+            contextText: selectionText,
+            model: selectedModel,
+            customModelId: customModelId,
+            openPDFPath: openPDFPath,
+            activate: true
+        )
     }
 }
 

@@ -84,6 +84,15 @@ struct AppShellView: View {
             allowsMultipleSelection: false,
             onCompletion: handleFileImport
         )
+        .onChange(of: openAISessionStore.activeSessionId) { _ in
+            syncFileURLForActiveSession(in: openAISessionStore)
+        }
+        .onChange(of: claudeSessionStore.activeSessionId) { _ in
+            syncFileURLForActiveSession(in: claudeSessionStore)
+        }
+        .onChange(of: selectedProvider) { _ in
+            syncFileURLForActiveSession(in: activeSessionStore)
+        }
         .alert("Could not open PDF", isPresented: $isShowingOpenError) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -94,7 +103,8 @@ struct AppShellView: View {
     private func handleFileImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            fileURL = urls.first
+            guard let url = urls.first else { return }
+            handleOpenFile(url)
         case .failure(let error):
             openErrorMessage = error.localizedDescription
             isShowingOpenError = true
@@ -110,6 +120,80 @@ struct AppShellView: View {
         fileURL?.lastPathComponent ?? "document"
     }
 
+    private var activeSessionStore: SessionStore {
+        switch selectedProvider {
+        case .openAI:
+            return openAISessionStore
+        case .claude:
+            return claudeSessionStore
+        }
+    }
+
+    private func handleOpenFile(_ url: URL) {
+        fileURL = url
+        selectionText = ""
+        let path = url.path
+        if let existingSession = activeSessionStore.latestSession(matchingPDFPath: path) {
+            activeSessionStore.selectSession(existingSession.id)
+            activeSessionStore.updateActiveSessionOpenPDFPath(path)
+            isChatVisible = true
+            return
+        }
+
+        if hasAPIKey(for: selectedProvider) {
+            let session = activeSessionStore.createSession(
+                contextText: "",
+                model: LLMModel.defaultModel(for: selectedProvider),
+                openPDFPath: path,
+                activate: true
+            )
+            activeSessionStore.selectSession(session.id)
+            isChatVisible = true
+        } else {
+            isChatVisible = false
+        }
+    }
+
+    private func syncFileURLForActiveSession(in store: SessionStore) {
+        guard store.provider == selectedProvider else { return }
+        guard let path = store.activeSession?.openPDFPath else {
+            fileURL = nil
+            selectionText = ""
+            return
+        }
+        let nextURL = URL(fileURLWithPath: path)
+        if fileURL?.path != nextURL.path {
+            fileURL = nextURL
+            selectionText = ""
+        }
+    }
+
+    private func hasAPIKey(for provider: LLMProvider) -> Bool {
+        do {
+            _ = try keyProvider(for: provider).loadAPIKey()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func keyProvider(for provider: LLMProvider) -> any APIKeyProvider {
+        switch provider {
+        case .openAI:
+            let config = OpenAIClientConfiguration.load()
+            return CompositeAPIKeyProvider(providers: [
+                KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
+                EnvironmentAPIKeyProvider(environmentKey: provider.environmentKey)
+            ])
+        case .claude:
+            let config = ClaudeClientConfiguration.load()
+            return CompositeAPIKeyProvider(providers: [
+                KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
+                EnvironmentAPIKeyProvider(environmentKey: provider.environmentKey)
+            ])
+        }
+    }
+
     @ViewBuilder
     private var activeChatPanel: some View {
         switch selectedProvider {
@@ -117,6 +201,7 @@ struct AppShellView: View {
             OpenAILLMChatServing(
                 documentId: documentId,
                 selectionText: selectionText,
+                openPDFPath: fileURL?.path,
                 sessionStore: openAISessionStore,
                 onClose: { isChatVisible = false }
             )
@@ -124,6 +209,7 @@ struct AppShellView: View {
             ClaudeLLMChatServing(
                 documentId: documentId,
                 selectionText: selectionText,
+                openPDFPath: fileURL?.path,
                 sessionStore: claudeSessionStore,
                 onClose: { isChatVisible = false }
             )
@@ -134,6 +220,7 @@ struct AppShellView: View {
 struct OpenAILLMChatServing: View {
     let documentId: String
     let selectionText: String
+    let openPDFPath: String?
     let sessionStore: SessionStore
     let onClose: () -> Void
 
@@ -141,6 +228,7 @@ struct OpenAILLMChatServing: View {
         ChatPanel(
             documentId: documentId,
             selectionText: selectionText,
+            openPDFPath: openPDFPath,
             sessionStore: sessionStore,
             onClose: onClose
         )
@@ -150,6 +238,7 @@ struct OpenAILLMChatServing: View {
 struct ClaudeLLMChatServing: View {
     let documentId: String
     let selectionText: String
+    let openPDFPath: String?
     let sessionStore: SessionStore
     let onClose: () -> Void
 
@@ -157,6 +246,7 @@ struct ClaudeLLMChatServing: View {
         ChatPanel(
             documentId: documentId,
             selectionText: selectionText,
+            openPDFPath: openPDFPath,
             sessionStore: sessionStore,
             onClose: onClose
         )

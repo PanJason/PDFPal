@@ -10,6 +10,7 @@ struct ChatSession: Identifiable {
     var messages: [ChatMessage]
     var selectedModel: LLMModel
     var customModelId: String
+    var openPDFPath: String?
 }
 
 final class SessionStore: ObservableObject {
@@ -22,11 +23,6 @@ final class SessionStore: ObservableObject {
 
     init(provider: LLMProvider) {
         self.provider = provider
-        _ = createSession(
-            contextText: "",
-            model: LLMModel.defaultModel(for: provider),
-            activate: true
-        )
     }
 
     var activeSession: ChatSession? {
@@ -39,6 +35,7 @@ final class SessionStore: ObservableObject {
         contextText: String,
         model: LLMModel,
         customModelId: String = "",
+        openPDFPath: String? = nil,
         activate: Bool = true
     ) -> ChatSession {
         let resolvedModel = model.provider == provider
@@ -52,7 +49,8 @@ final class SessionStore: ObservableObject {
             contextText: contextText,
             messages: [],
             selectedModel: resolvedModel,
-            customModelId: resolvedModel.isCustom ? customModelId : ""
+            customModelId: resolvedModel.isCustom ? customModelId : "",
+            openPDFPath: openPDFPath
         )
         sessions.append(session)
         if activate {
@@ -83,6 +81,12 @@ final class SessionStore: ObservableObject {
     func updateActiveSessionCustomModelId(_ customModelId: String) {
         updateActiveSession { session in
             session.customModelId = customModelId
+        }
+    }
+
+    func updateActiveSessionOpenPDFPath(_ openPDFPath: String?) {
+        updateActiveSession { session in
+            session.openPDFPath = openPDFPath
         }
     }
 
@@ -123,6 +127,13 @@ final class SessionStore: ObservableObject {
     private var activeSessionIndex: Int? {
         guard let activeSessionId else { return nil }
         return sessions.firstIndex(where: { $0.id == activeSessionId })
+    }
+
+    func latestSession(matchingPDFPath path: String) -> ChatSession? {
+        sessions
+            .filter { $0.openPDFPath == path }
+            .sorted { $0.createdAt > $1.createdAt }
+            .first
     }
 
     private func nextSessionTitle() -> String {
