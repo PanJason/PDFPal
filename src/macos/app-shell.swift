@@ -112,7 +112,26 @@ struct AppShellView: View {
     }
 
     private func handleAskLLM(_ text: String) {
+        guard let path = fileURL?.path else { return }
+        if let activeSession = activeSessionStore.activeSession,
+           activeSession.openPDFPath == path {
+            selectionText = text
+            activeSessionStore.updateActiveSessionContext(text)
+            isChatVisible = true
+            return
+        }
+
+        guard activeSessionStore.activeSession == nil else { return }
+        guard hasAPIKey(for: selectedProvider) else { return }
+
         selectionText = text
+        let session = activeSessionStore.createSession(
+            contextText: text,
+            model: LLMModel.defaultModel(for: selectedProvider),
+            openPDFPath: path,
+            activate: true
+        )
+        activeSessionStore.selectSession(session.id)
         isChatVisible = true
     }
 

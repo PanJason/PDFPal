@@ -73,10 +73,12 @@ struct PDFKitContainer: NSViewRepresentable {
 
 final class PDFKitView: PDFView {
     var onAskLLM: ((String) -> Void)?
+    private var lastSelectionText: String = ""
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
         let selectionText = currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        lastSelectionText = selectionText
 
         menu.items.removeAll { $0.title == "Ask LLM" }
         while menu.items.last?.isSeparatorItem == true {
@@ -95,9 +97,10 @@ final class PDFKitView: PDFView {
     }
 
     @objc private func handleAskLLM() {
-        guard let selection = currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !selection.isEmpty
-        else {
+        let selection = lastSelectionText.isEmpty
+            ? currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            : lastSelectionText
+        guard !selection.isEmpty else {
             return
         }
         onAskLLM?(selection)

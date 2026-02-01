@@ -68,8 +68,8 @@ struct ChatPanel: View {
             syncContextWithSelection()
             loadSessionState()
         }
-        .onChange(of: selectionText) { _ in
-            syncContextWithSelection()
+        .onChange(of: selectionText) { newText in
+            syncContextWithSelection(using: newText)
         }
         .onChange(of: sessionStore.activeSessionId) { _ in
             loadSessionState()
@@ -556,9 +556,10 @@ struct ChatPanel: View {
         hasReceivedDelta = false
     }
 
-    private func syncContextWithSelection() {
-        guard selectionText != activeContext else { return }
-        sessionStore.updateActiveSessionContext(selectionText)
+    private func syncContextWithSelection(using text: String? = nil) {
+        let newContext = text ?? selectionText
+        guard newContext != activeContext else { return }
+        sessionStore.updateActiveSessionContext(newContext)
         resetConversation()
     }
 
