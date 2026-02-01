@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ChatPanel: View {
+    let documentId: String
     let selectionText: String
     let onClose: () -> Void
 
@@ -10,10 +11,19 @@ struct ChatPanel: View {
     @State private var errorMessage: String? = nil
     @State private var retryPrompt: String? = nil
     @State private var lastContext = ""
+    @State private var selectedModel: LLMModel = .defaultOpenAI
+    @State private var customModelId = ""
+    @State private var isAPIKeyAvailable = false
+    @State private var isShowingKeyPrompt = false
+    @State private var keyPromptModel: LLMModel = .defaultOpenAI
+    @State private var streamTask: Task<Void, Never>? = nil
+    @State private var activeStreamId: UUID? = nil
+    @State private var hasReceivedDelta = false
 
     var body: some View {
         VStack(spacing: 16) {
             header
+            modelSelector
             contextCard
             Divider()
             messageList
@@ -23,9 +33,26 @@ struct ChatPanel: View {
         .padding(20)
         .onAppear {
             resetConversationIfNeeded()
+            updateKeyAvailability(for: selectedModel)
+            promptForKeyIfNeeded(for: selectedModel)
         }
         .onChange(of: selectionText) { _ in
             resetConversationIfNeeded()
+        }
+        .onChange(of: selectedModel) { newValue in
+            updateKeyAvailability(for: newValue)
+            promptForKeyIfNeeded(for: newValue)
+        }
+        .sheet(isPresented: $isShowingKeyPrompt) {
+            APIKeyPrompt(
+                providerName: keyPromptModel.provider.displayName,
+                apiKeyName: keyPromptModel.provider.apiKeyName,
+                onSave: saveAPIKey,
+                onCancel: { isShowingKeyPrompt = false }
+            )
+        }
+        .onDisappear {
+            cancelStream()
         }
     }
 
@@ -34,14 +61,46 @@ struct ChatPanel: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Chat")
                     .font(.title2)
-                Text("Model: GPT (mock)")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
             }
             Spacer()
             Button("Close") {
                 onClose()
             }
+        }
+    }
+
+    private var modelSelector: some View {
+        GroupBox(label: Label("Model", systemImage: "cpu")) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Picker("Model", selection: $selectedModel) {
+                        ForEach(LLMModel.openAIModels) { model in
+                            Text(model.displayName).tag(model)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    Spacer()
+                    Button("Set API Key") {
+                        presentKeyPrompt(for: selectedModel)
+                    }
+                }
+
+                if selectedModel.isCustom {
+                    TextField("Enter custom model id", text: $customModelId)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                HStack(spacing: 8) {
+                    Text("API Key:")
+                        .foregroundColor(.secondary)
+                    Text(isAPIKeyAvailable ? "Stored" : "Missing")
+                        .foregroundColor(isAPIKeyAvailable ? .green : .red)
+                    Text(selectedModel.provider.apiKeyName)
+                        .foregroundColor(.secondary)
+                }
+                .font(.footnote)
+            }
+            .padding(.vertical, 4)
         }
     }
 
@@ -69,7 +128,7 @@ struct ChatPanel: View {
                     ForEach(messages) { message in
                         ChatMessageRow(message: message)
                     }
-                    if isSending {
+                    if isSending && !hasReceivedDelta {
                         ChatLoadingRow()
                     }
                     Color.clear
@@ -96,7 +155,7 @@ struct ChatPanel: View {
                         .foregroundColor(.red)
                     Text(errorMessage)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    if retryPrompt != nil {
+                    if retryPrompt != nil && !isSending {
                         Button("Retry") {
                             retrySend()
                         }
@@ -138,9 +197,16 @@ struct ChatPanel: View {
                     sendMessage()
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(isSending || inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isSendDisabled)
             }
         }
+    }
+
+    private var isSendDisabled: Bool {
+        if isSending { return true }
+        if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        if selectedModel.isCustom && resolvedModelId() == nil { return true }
+        return false
     }
 
     private var contextText: String {
@@ -157,41 +223,204 @@ struct ChatPanel: View {
             return
         }
 
-        let prompt = trimmed
+        guard validateModelSelection() else { return }
         inputText = ""
-        errorMessage = nil
-        isSending = true
-        messages.append(ChatMessage(role: .user, text: prompt))
-        retryPrompt = prompt
-
-        simulateResponse(for: prompt)
+        startStreaming(prompt: trimmed, appendUserMessage: true)
     }
 
     private func retrySend() {
         guard let retryPrompt else { return }
+        guard validateModelSelection() else { return }
         errorMessage = nil
-        isSending = true
-        simulateResponse(for: retryPrompt)
+        removeTrailingAssistantMessage()
+        startStreaming(prompt: retryPrompt, appendUserMessage: false)
     }
 
-    private func simulateResponse(for prompt: String) {
-        let shouldFail = prompt.lowercased().contains("fail") || prompt.lowercased().contains("error")
-        let selectionLength = selectionText.count
-        let contextSnapshot = selectionText
+    private func validateModelSelection() -> Bool {
+        guard let modelId = resolvedModelId(), !modelId.isEmpty else {
+            errorMessage = "Enter a model id before sending."
+            return false
+        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            guard contextSnapshot == selectionText else { return }
-            isSending = false
-            if shouldFail {
-                errorMessage = "Mock LLM request failed. Retry to send again."
-            } else {
-                let reply = """
-                Mock reply. Selection length: \(selectionLength) characters.
-                Prompt: \(prompt)
-                """
-                messages.append(ChatMessage(role: .assistant, text: reply))
+        guard ensureAPIKeyAvailable(for: selectedModel) else { return false }
+        return true
+    }
+
+    private func startStreaming(prompt: String, appendUserMessage: Bool) {
+        guard let modelId = resolvedModelId(), !modelId.isEmpty else { return }
+        cancelStream()
+        errorMessage = nil
+        isSending = true
+        retryPrompt = prompt
+        hasReceivedDelta = false
+
+        if appendUserMessage {
+            messages.append(ChatMessage(role: .user, text: prompt))
+        }
+
+        let streamId = UUID()
+        activeStreamId = streamId
+        let assistantId = UUID()
+
+        let request = LLMRequest(
+            documentId: documentId,
+            selectionText: selectionText,
+            userPrompt: prompt,
+            context: nil
+        )
+        let client = makeClient(for: selectedModel, modelId: modelId)
+
+        streamTask = Task {
+            do {
+                for try await event in client.stream(request: request) {
+                    try Task.checkCancellation()
+                    await MainActor.run {
+                        guard activeStreamId == streamId else { return }
+                        handleStreamEvent(event, assistantId: assistantId)
+                    }
+                }
+            } catch {
+                if error is CancellationError { return }
+                await MainActor.run {
+                    handleStreamError(error, streamId: streamId)
+                }
             }
         }
+    }
+
+    private func handleStreamEvent(_ event: LLMStreamEvent, assistantId: UUID) {
+        switch event {
+        case .textDelta(let delta):
+            appendAssistantDelta(delta, assistantId: assistantId)
+        case .completed(let response):
+            finalizeAssistantMessage(response.replyText, assistantId: assistantId)
+            isSending = false
+            activeStreamId = nil
+        }
+    }
+
+    private func appendAssistantDelta(_ delta: String, assistantId: UUID) {
+        if !hasReceivedDelta {
+            messages.append(ChatMessage(id: assistantId, role: .assistant, text: delta))
+            hasReceivedDelta = true
+        } else if let index = messages.firstIndex(where: { $0.id == assistantId }) {
+            messages[index].text += delta
+        }
+    }
+
+    private func finalizeAssistantMessage(_ text: String, assistantId: UUID) {
+        if !hasReceivedDelta {
+            messages.append(ChatMessage(id: assistantId, role: .assistant, text: text))
+            hasReceivedDelta = true
+        } else if let index = messages.firstIndex(where: { $0.id == assistantId }) {
+            messages[index].text = text
+        }
+    }
+
+    private func handleStreamError(_ error: Error, streamId: UUID) {
+        guard activeStreamId == streamId else { return }
+        isSending = false
+        activeStreamId = nil
+        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        errorMessage = message
+    }
+
+    private func resolvedModelId() -> String? {
+        if selectedModel.isCustom {
+            let trimmed = customModelId.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return selectedModel.id
+    }
+
+    private func makeClient(for model: LLMModel, modelId: String) -> any LLMClient {
+        switch model.provider {
+        case .openAI:
+            let base = OpenAIClientConfiguration.load()
+            let config = OpenAIClientConfiguration(
+                endpoint: base.endpoint,
+                model: modelId,
+                timeout: base.timeout,
+                keychainService: base.keychainService,
+                keychainAccount: base.keychainAccount
+            )
+            return OpenAIStreamingClient(configuration: config)
+        }
+    }
+
+    private func ensureAPIKeyAvailable(for model: LLMModel) -> Bool {
+        let hasKey = hasAPIKey(for: model)
+        isAPIKeyAvailable = hasKey
+        if !hasKey {
+            errorMessage = "API key required for \(model.provider.displayName). Set \(model.provider.apiKeyName)."
+            promptForKeyIfNeeded(for: model)
+        }
+        return hasKey
+    }
+
+    private func updateKeyAvailability(for model: LLMModel) {
+        isAPIKeyAvailable = hasAPIKey(for: model)
+    }
+
+    private func hasAPIKey(for model: LLMModel) -> Bool {
+        do {
+            _ = try keyProvider(for: model).loadAPIKey()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func promptForKeyIfNeeded(for model: LLMModel) {
+        guard !hasAPIKey(for: model) else { return }
+        guard !isShowingKeyPrompt else { return }
+        presentKeyPrompt(for: model)
+    }
+
+    private func presentKeyPrompt(for model: LLMModel) {
+        keyPromptModel = model
+        isShowingKeyPrompt = true
+    }
+
+    private func saveAPIKey(_ key: String) throws {
+        let store = keyStore(for: keyPromptModel)
+        try store.saveAPIKey(key)
+        isShowingKeyPrompt = false
+        updateKeyAvailability(for: keyPromptModel)
+    }
+
+    private func keyProvider(for model: LLMModel) -> any APIKeyProvider {
+        switch model.provider {
+        case .openAI:
+            let config = OpenAIClientConfiguration.load()
+            return CompositeAPIKeyProvider(providers: [
+                KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
+                EnvironmentAPIKeyProvider(environmentKey: model.provider.environmentKey)
+            ])
+        }
+    }
+
+    private func keyStore(for model: LLMModel) -> any APIKeyStore {
+        switch model.provider {
+        case .openAI:
+            let config = OpenAIClientConfiguration.load()
+            return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
+        }
+    }
+
+    private func cancelStream() {
+        streamTask?.cancel()
+        streamTask = nil
+        activeStreamId = nil
+        hasReceivedDelta = false
+        isSending = false
+    }
+
+    private func removeTrailingAssistantMessage() {
+        if let last = messages.last, last.role == .assistant {
+            messages.removeLast()
+        }
+        hasReceivedDelta = false
     }
 
     private func resetConversationIfNeeded() {
@@ -199,7 +428,7 @@ struct ChatPanel: View {
         lastContext = selectionText
         messages.removeAll()
         inputText = ""
-        isSending = false
+        cancelStream()
         errorMessage = nil
         retryPrompt = nil
     }
@@ -212,9 +441,15 @@ struct ChatPanel: View {
 }
 
 struct ChatMessage: Identifiable {
-    let id = UUID()
+    let id: UUID
     let role: ChatRole
-    let text: String
+    var text: String
+
+    init(id: UUID = UUID(), role: ChatRole, text: String) {
+        self.id = id
+        self.role = role
+        self.text = text
+    }
 }
 
 enum ChatRole {
@@ -275,4 +510,116 @@ struct ChatLoadingRow: View {
             Spacer(minLength: 32)
         }
     }
+}
+
+struct APIKeyPrompt: View {
+    let providerName: String
+    let apiKeyName: String
+    let onSave: (String) throws -> Void
+    let onCancel: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var apiKeyInput = ""
+    @State private var errorMessage: String? = nil
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("API Key Required")
+                .font(.title2)
+
+            Text("Enter your \(providerName) key (\(apiKeyName)). It will be stored in Keychain.")
+                .font(.body)
+                .foregroundColor(.secondary)
+
+            SecureField("API key", text: $apiKeyInput)
+                .textFieldStyle(.roundedBorder)
+                .focused($isFocused)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .foregroundColor(.red)
+            }
+
+            HStack {
+                Button("Cancel") {
+                    onCancel()
+                    dismiss()
+                }
+                Spacer()
+                Button("Save Key") {
+                    do {
+                        try onSave(apiKeyInput)
+                        dismiss()
+                    } catch {
+                        errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 360)
+        .onAppear {
+            DispatchQueue.main.async {
+                isFocused = true
+            }
+        }
+    }
+}
+
+enum LLMProvider: String, CaseIterable, Identifiable, Hashable {
+    case openAI
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .openAI:
+            return "OpenAI"
+        }
+    }
+
+    var apiKeyName: String {
+        switch self {
+        case .openAI:
+            return "OPENAI_API_KEY"
+        }
+    }
+
+    var environmentKey: String {
+        switch self {
+        case .openAI:
+            return "OPENAI_API_KEY"
+        }
+    }
+}
+
+struct LLMModel: Identifiable, Hashable {
+    let id: String
+    let displayName: String
+    let provider: LLMProvider
+    let isCustom: Bool
+
+    static let defaultOpenAI = LLMModel(
+        id: "gpt-4o",
+        displayName: "GPT-4o",
+        provider: .openAI,
+        isCustom: false
+    )
+
+    static let openAIModels: [LLMModel] = [
+        defaultOpenAI,
+        LLMModel(
+            id: "gpt-4o-mini",
+            displayName: "GPT-4o mini",
+            provider: .openAI,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "custom-openai",
+            displayName: "Custom (OpenAI)",
+            provider: .openAI,
+            isCustom: true
+        )
+    ]
 }
