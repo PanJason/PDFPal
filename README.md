@@ -1,4 +1,14 @@
-# LLM Paper Reading Helper
+# PDFPal - Your AI-powered PDF reader with smart notes
+<p align="center">
+    <picture>
+        <img src="resource/banner.png" alt="PDFPal" width="500">
+    </picture>
+</p>
+
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-APACHE_2.0-blue.svg?style=for-the-badge" alt="APACHE_2.0 License"></a>
+</p>
 
 A lightweight macOS PDF reader with an integrated LLM chat panel. Select text in a paper, invoke an LLM, and keep model-specific chat sessions alongside the document.
 
