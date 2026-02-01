@@ -63,6 +63,17 @@ final class SessionStore: ObservableObject {
         activeSessionId = id
     }
 
+    func deleteSession(_ id: UUID) {
+        let wasActive = (activeSessionId == id)
+        sessions.removeAll { $0.id == id }
+        if wasActive {
+            activeSessionId = sessions
+                .sorted { $0.createdAt > $1.createdAt }
+                .first?
+                .id
+        }
+    }
+
     func updateActiveSessionContext(_ contextText: String) {
         updateActiveSession { session in
             session.contextText = contextText

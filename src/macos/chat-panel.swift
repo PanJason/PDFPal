@@ -272,7 +272,8 @@ struct ChatPanel: View {
             onSelect: { sessionId in
                 sessionStore.selectSession(sessionId)
             },
-            onNewSession: createNewSession
+            onNewSession: createNewSession,
+            onDeleteSession: deleteSession
         )
         .frame(width: 220)
     }
@@ -556,6 +557,11 @@ struct ChatPanel: View {
         hasReceivedDelta = false
     }
 
+    private func deleteSession(_ sessionId: UUID) {
+        cancelStream()
+        sessionStore.deleteSession(sessionId)
+    }
+
     private func syncContextWithSelection(using text: String? = nil) {
         let newContext = text ?? selectionText
         guard newContext != activeContext else { return }
@@ -736,6 +742,9 @@ struct SessionSidebar: View {
     let activeSessionId: UUID?
     let onSelect: (UUID) -> Void
     let onNewSession: () -> Void
+    let onDeleteSession: (UUID) -> Void
+
+    @State private var hoveringSessionId: UUID? = nil
 
     var body: some View {
         VStack(spacing: 12) {
@@ -754,9 +763,7 @@ struct SessionSidebar: View {
             ScrollView {
                 VStack(spacing: 8) {
                     ForEach(sessions) { session in
-                        Button {
-                            onSelect(session.id)
-                        } label: {
+                        HStack(spacing: 8) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(session.title)
                                     .font(.subheadline)
@@ -764,12 +771,29 @@ struct SessionSidebar: View {
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                            .background(backgroundColor(for: session))
-                            .cornerRadius(8)
+                            Spacer()
+                            if hoveringSessionId == session.id {
+                                Button {
+                                    onDeleteSession(session.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundColor(.secondary)
+                                .accessibilityLabel("Delete session")
+                            }
                         }
-                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(backgroundColor(for: session))
+                        .cornerRadius(8)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onSelect(session.id)
+                        }
+                        .onHover { hovering in
+                            hoveringSessionId = hovering ? session.id : nil
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
