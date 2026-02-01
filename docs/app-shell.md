@@ -12,6 +12,7 @@ routing state that reveals the chat panel when an Ask LLM action occurs.
  * LLMPaperReadingHelperApp - SwiftUI app entry point
  *
  * Creates the main window group and hosts AppShellView as the root view.
+ * Activates the app on launch to ensure keyboard focus.
  */
 @main
 struct LLMPaperReadingHelperApp: App {}
@@ -23,17 +24,31 @@ struct LLMPaperReadingHelperApp: App {}
  * panel is visible. Hosts PDFViewer and the chat panel.
  */
 struct AppShellView: View {}
+
+/**
+ * OpenAILLMChatServing - OpenAI chat panel implementation
+ * @documentId: Identifier for the open document session
+ * @selectionText: Text selection captured from the PDF viewer
+ * @onClose: Callback when the user closes the chat panel
+ *
+ * Renders the OpenAI chat UI with model selection, API key prompt,
+ * and streaming responses.
+ */
+struct OpenAILLMChatServing: View {}
 ```
 
 ## State Management
 - `AppShellView` owns `@State` properties for file selection, chat visibility,
   selection text, and error presentation.
 - `selectionText` is updated when `PDFViewer` invokes the Ask LLM callback.
+- `documentId` is derived from the selected file name and passed into the
+  chat panel.
 
 ## Integration Points
 - PDF rendering and selection are provided by `PDFViewer` from
   `src/macos/pdf-viewer.swift`.
-- Chat rendering is provided by `ChatPanel` in `src/macos/chat-panel.swift`.
+- Chat rendering is provided by `OpenAILLMChatServing` in
+  `src/macos/app-shell.swift`.
 - File import uses SwiftUI `fileImporter` with `UTType.pdf`.
 
 ## Usage Examples
@@ -46,6 +61,10 @@ AppShellView()
 // Example of wiring the PDF panel with the chat panel.
 HSplitView {
     PDFViewer(fileURL: fileURL, onAskLLM: handleAskLLM)
-    ChatPanel(documentId: documentId, selectionText: selectionText, onClose: closeChat)
+    OpenAILLMChatServing(
+        documentId: documentId,
+        selectionText: selectionText,
+        onClose: closeChat
+    )
 }
 ```
