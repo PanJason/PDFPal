@@ -84,14 +84,22 @@ struct AppShellView: View {
             allowsMultipleSelection: false,
             onCompletion: handleFileImport
         )
-        .onChange(of: openAISessionStore.activeSessionId) { _ in
+        .onReceive(openAISessionStore.$activeSessionId) { _ in
             syncFileURLForActiveSession(in: openAISessionStore)
         }
-        .onChange(of: claudeSessionStore.activeSessionId) { _ in
+        .onReceive(claudeSessionStore.$activeSessionId) { _ in
             syncFileURLForActiveSession(in: claudeSessionStore)
         }
         .onChange(of: selectedProvider) { _ in
             syncFileURLForActiveSession(in: activeSessionStore)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            openAISessionStore.persistNow()
+            claudeSessionStore.persistNow()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            openAISessionStore.persistNow()
+            claudeSessionStore.persistNow()
         }
         .alert("Could not open PDF", isPresented: $isShowingOpenError) {
             Button("OK", role: .cancel) {}

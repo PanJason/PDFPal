@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-struct ChatSession: Identifiable {
+struct ChatSession: Identifiable, Codable {
     let id: UUID
     var title: String
     let provider: LLMProvider
@@ -20,9 +20,15 @@ final class SessionStore: ObservableObject {
     @Published var activeSessionId: UUID?
 
     private var sessionCounter = 0
+    private let persistenceURL: URL
+    private var isLoading = false
+    private var cancellables = Set<AnyCancellable>()
 
     init(provider: LLMProvider) {
         self.provider = provider
+        self.persistenceURL = SessionStore.persistenceURL(for: provider)
+        loadSessions()
+        startPersistence()
     }
 
     var activeSession: ChatSession? {
@@ -72,6 +78,10 @@ final class SessionStore: ObservableObject {
                 .first?
                 .id
         }
+    }
+
+    func persistNow() {
+        persistSessions()
     }
 
     func updateActiveSessionContext(_ contextText: String) {
@@ -150,5 +160,64 @@ final class SessionStore: ObservableObject {
     private func nextSessionTitle() -> String {
         sessionCounter += 1
         return "Session \(sessionCounter)"
+    }
+}
+
+private extension SessionStore {
+    struct PersistedSessions: Codable {
+        let activeSessionId: UUID?
+        let sessions: [ChatSession]
+    }
+
+    static func persistenceURL(for provider: LLMProvider) -> URL {
+        let fileManager = FileManager.default
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: fileManager.currentDirectoryPath)
+        let directory = base.appendingPathComponent("LLMPaperReadingHelper", isDirectory: true)
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+        return directory.appendingPathComponent("sessions-\(provider.rawValue).json")
+    }
+
+    func loadSessions() {
+        isLoading = true
+        defer { isLoading = false }
+        guard let data = try? Data(contentsOf: persistenceURL) else { return }
+        do {
+            let payload = try JSONDecoder().decode(PersistedSessions.self, from: data)
+            sessions = payload.sessions
+            activeSessionId = payload.activeSessionId ?? sessions.first?.id
+            sessionCounter = max(sessionCounter, sessions.count)
+        } catch {
+            sessions = []
+            activeSessionId = nil
+        }
+    }
+
+    func startPersistence() {
+        $sessions
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.persistSessions()
+            }
+            .store(in: &cancellables)
+
+        $activeSessionId
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.persistSessions()
+            }
+            .store(in: &cancellables)
+    }
+
+    func persistSessions() {
+        guard !isLoading else { return }
+        let payload = PersistedSessions(activeSessionId: activeSessionId, sessions: sessions)
+        do {
+            let data = try JSONEncoder().encode(payload)
+            try data.write(to: persistenceURL, options: [.atomic])
+        } catch {
+            return
+        }
     }
 }

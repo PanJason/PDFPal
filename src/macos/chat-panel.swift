@@ -564,6 +564,8 @@ struct ChatPanel: View {
 
     private func syncContextWithSelection(using text: String? = nil) {
         let newContext = text ?? selectionText
+        let trimmed = newContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         guard newContext != activeContext else { return }
         sessionStore.updateActiveSessionContext(newContext)
         resetConversation()
@@ -610,7 +612,7 @@ struct ChatPanel: View {
     }
 }
 
-struct ChatMessage: Identifiable {
+struct ChatMessage: Identifiable, Codable {
     let id: UUID
     let role: ChatRole
     var text: String
@@ -622,7 +624,7 @@ struct ChatMessage: Identifiable {
     }
 }
 
-enum ChatRole {
+enum ChatRole: String, Codable {
     case user
     case assistant
 }
@@ -811,7 +813,7 @@ struct SessionSidebar: View {
     }
 }
 
-enum LLMProvider: String, CaseIterable, Identifiable, Hashable {
+enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
     case openAI
     case claude
 
@@ -845,7 +847,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
-struct LLMModel: Identifiable, Hashable {
+struct LLMModel: Identifiable, Hashable, Codable {
     let id: String
     let displayName: String
     let provider: LLMProvider
