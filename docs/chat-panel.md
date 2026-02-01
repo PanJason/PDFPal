@@ -5,7 +5,8 @@ The Chat Panel renders the right-side conversation UI for the macOS app. It
 shows the selected PDF context, a scrollable message list, an input composer,
 and UI states for loading and errors with retry. It includes a model picker,
 API key prompt, per-provider session selection sidebar, and streaming updates
-from the LLM service.
+from the LLM service. A hover-only fold control lets the user hide or show the
+session sidebar.
 
 ## Public API
 ```swift
@@ -19,7 +20,8 @@ from the LLM service.
  * Renders a header, model picker, context card, message list, error banner,
  * and input composer. Streams responses from the LLM service and prompts
  * for an API key when needed. Displays a session sidebar for switching
- * between sessions within the current model family.
+ * between sessions within the current model family. The sidebar can be
+ * collapsed with a hover-only fold control.
  *
  * Example:
  *     ChatPanel(
@@ -85,6 +87,7 @@ struct LLMModel: Identifiable {}
   so each provider maintains its own session list.
 - The panel updates the active session context when selection text changes.
 - Model selection state drives the OpenAI or Claude streaming client configuration.
+- The session sidebar visibility is toggled from a hover-only fold control.
 
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers

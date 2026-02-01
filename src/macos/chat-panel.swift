@@ -18,6 +18,8 @@ struct ChatPanel: View {
     @State private var streamTask: Task<Void, Never>? = nil
     @State private var activeStreamId: UUID? = nil
     @State private var hasReceivedDelta = false
+    @State private var isSessionSidebarVisible = true
+    @State private var isHoveringFoldHandle = false
 
     init(
         documentId: String,
@@ -57,8 +59,10 @@ struct ChatPanel: View {
     var body: some View {
         HStack(spacing: 0) {
             chatContent
-            Divider()
-            sessionSidebar
+            if isSessionSidebarVisible {
+                Divider()
+                sessionSidebar
+            }
         }
         .onAppear {
             syncContextWithSelection()
@@ -105,6 +109,11 @@ struct ChatPanel: View {
             inputBar
         }
         .padding(20)
+        .overlay(alignment: .topTrailing) {
+            foldHandle
+                .padding(.top, 6)
+                .padding(.trailing, 6)
+        }
     }
 
     private var header: some View {
@@ -266,6 +275,28 @@ struct ChatPanel: View {
             onNewSession: createNewSession
         )
         .frame(width: 220)
+    }
+
+    private var foldHandle: some View {
+        let iconName = isSessionSidebarVisible ? "sidebar.right" : "sidebar.left"
+        return ZStack {
+            Rectangle()
+                .fill(Color.clear)
+            Button {
+                isSessionSidebarVisible.toggle()
+            } label: {
+                Image(systemName: iconName)
+                    .imageScale(.medium)
+            }
+            .buttonStyle(.plain)
+            .opacity(isHoveringFoldHandle ? 1 : 0)
+        }
+        .frame(width: 28, height: 28)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHoveringFoldHandle = hovering
+        }
+        .accessibilityLabel(isSessionSidebarVisible ? "Hide sessions" : "Show sessions")
     }
 
     private var isSendDisabled: Bool {
