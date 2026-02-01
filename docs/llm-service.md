@@ -81,7 +81,7 @@ The LLM service is stateless. Each call builds a request from the provided
 inside the call scope.
 
 ## Integration Points
-- `OpenAIStreamingClient` reads the API key from Keychain first, then falls back to
+- `OpenAIStreamingClient` (in `src/macos/llm/openai-client.swift`) reads the API key from Keychain first, then falls back to
   `OPENAI_API_KEY` for development.
 - API keys saved from the chat panel are stored in Keychain via `KeychainAPIKeyStore`.
 - Configuration is loaded from environment overrides: `OPENAI_API_ENDPOINT`,

@@ -75,7 +75,7 @@ struct LLMModel: Identifiable {}
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers
   Ask LLM.
-- Streaming responses use `OpenAIStreamingClient` from `llm-client.swift`.
+- Streaming responses use `OpenAIStreamingClient` from `src/macos/llm/openai-client.swift`.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples
