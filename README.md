@@ -17,9 +17,7 @@ A lightweight macOS PDF reader with an integrated LLM chat panel. Select text in
 - Open and read local PDFs with PDFKit
 - Select text and invoke an LLM from a context menu
 - Split-view layout: PDF on the left, chat on the right
-- Model family and model selection (OpenAI + Claude today)
-- Session store per model family with a right-side session list
-- API key input stored locally in the Keychain
+- Note renderer: render notes as markdown on the right (WIP)
 
 ## Table of Contents
 
