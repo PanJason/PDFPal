@@ -26,13 +26,12 @@ struct LLMPaperReadingHelperApp: App {}
 struct AppShellView: View {}
 
 /**
- * OpenAILLMChatServing - OpenAI chat panel implementation
+ * OpenAILLMChatServing - OpenAI chat panel wrapper
  * @documentId: Identifier for the open document session
  * @selectionText: Text selection captured from the PDF viewer
  * @onClose: Callback when the user closes the chat panel
  *
- * Renders the OpenAI chat UI with model selection, API key prompt,
- * and streaming responses.
+ * Wraps the generic ChatPanel with OpenAI defaults.
  */
 struct OpenAILLMChatServing: View {}
 ```
@@ -48,7 +47,8 @@ struct OpenAILLMChatServing: View {}
 - PDF rendering and selection are provided by `PDFViewer` from
   `src/macos/pdf-viewer.swift`.
 - Chat rendering is provided by `OpenAILLMChatServing` in
-  `src/macos/app-shell.swift`.
+  `src/macos/app-shell.swift`, which delegates to `ChatPanel` in
+  `src/macos/chat-panel.swift`.
 - File import uses SwiftUI `fileImporter` with `UTType.pdf`.
 
 ## Usage Examples
