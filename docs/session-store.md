@@ -1,10 +1,11 @@
 # Session Store Component Documentation
 
 ## Overview
-The Session Store keeps in-memory chat sessions scoped by model family. Each
-provider (OpenAI, Claude) has its own `SessionStore`, and the Chat Panel uses
-it to persist messages, selected models, and context per session. The store
-backs the session sidebar on the right side of the chat panel.
+The Session Store keeps chat sessions scoped by model family and persists them
+to disk. Each provider (OpenAI, Claude) has its own `SessionStore`, and the
+Chat Panel uses it to manage messages, selected models, and context per
+session. The store backs the session sidebar on the right side of the chat
+panel.
 
 ## Public API
 ```swift
@@ -43,6 +44,8 @@ final class SessionStore: ObservableObject {}
   reopen documents when switching sessions.
 - Deleting a session removes it from the list and reassigns the active session
   to the most recently created remaining session when needed.
+- Session data is written to Application Support as JSON per provider so
+  sessions restore after relaunch.
 
 ## Integration Points
 - `AppShellView` owns one `SessionStore` per provider and passes it into

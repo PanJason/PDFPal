@@ -88,6 +88,7 @@ struct LLMModel: Identifiable {}
 - Message history, model selection, and context live in a `SessionStore`
   so each provider maintains its own session list.
 - The panel updates the active session context when selection text changes.
+- Empty selections are ignored so restored sessions keep their last context.
 - Model selection state drives the OpenAI or Claude streaming client configuration.
 - The session sidebar visibility is toggled from a hover-only fold control.
 - The session sidebar allows deleting sessions from the current model family.

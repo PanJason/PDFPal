@@ -65,6 +65,7 @@ struct ClaudeLLMChatServing: View {}
   chat panel.
 - When a session is selected, the app shell reopens the session's associated
   PDF path so the left panel follows the active session.
+- Restored sessions are wired to reopen their PDFs as soon as they are selected.
 
 ## Integration Points
 - PDF rendering and selection are provided by `PDFViewer` from
