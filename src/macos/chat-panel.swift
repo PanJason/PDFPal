@@ -3,6 +3,7 @@ import SwiftUI
 struct ChatPanel: View {
     let documentId: String
     let selectionText: String
+    let provider: LLMProvider
     let onClose: () -> Void
 
     @State private var messages: [ChatMessage] = []
@@ -11,14 +12,29 @@ struct ChatPanel: View {
     @State private var errorMessage: String? = nil
     @State private var retryPrompt: String? = nil
     @State private var lastContext = ""
-    @State private var selectedModel: LLMModel = .defaultOpenAI
+    @State private var selectedModel: LLMModel
     @State private var customModelId = ""
     @State private var isAPIKeyAvailable = false
     @State private var isShowingKeyPrompt = false
-    @State private var keyPromptModel: LLMModel = .defaultOpenAI
+    @State private var keyPromptModel: LLMModel
     @State private var streamTask: Task<Void, Never>? = nil
     @State private var activeStreamId: UUID? = nil
     @State private var hasReceivedDelta = false
+
+    init(
+        documentId: String,
+        selectionText: String,
+        provider: LLMProvider,
+        onClose: @escaping () -> Void
+    ) {
+        self.documentId = documentId
+        self.selectionText = selectionText
+        self.provider = provider
+        self.onClose = onClose
+        let defaultModel = LLMModel.defaultModel(for: provider)
+        _selectedModel = State(initialValue: defaultModel)
+        _keyPromptModel = State(initialValue: defaultModel)
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -42,6 +58,15 @@ struct ChatPanel: View {
         .onChange(of: selectedModel) { newValue in
             updateKeyAvailability(for: newValue)
             promptForKeyIfNeeded(for: newValue)
+        }
+        .onChange(of: provider) { newValue in
+            let defaultModel = LLMModel.defaultModel(for: newValue)
+            selectedModel = defaultModel
+            keyPromptModel = defaultModel
+            customModelId = ""
+            resetConversation()
+            updateKeyAvailability(for: defaultModel)
+            promptForKeyIfNeeded(for: defaultModel)
         }
         .sheet(isPresented: $isShowingKeyPrompt) {
             APIKeyPrompt(
@@ -72,9 +97,12 @@ struct ChatPanel: View {
     private var modelSelector: some View {
         GroupBox(label: Label("Model", systemImage: "cpu")) {
             VStack(alignment: .leading, spacing: 10) {
+                Text("Family: \(provider.displayName)")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
                 HStack {
                     Picker("Model", selection: $selectedModel) {
-                        ForEach(LLMModel.openAIModels) { model in
+                        ForEach(LLMModel.models(for: provider)) { model in
                             Text(model.displayName).tag(model)
                         }
                     }
@@ -345,6 +373,18 @@ struct ChatPanel: View {
                 keychainAccount: base.keychainAccount
             )
             return OpenAIStreamingClient(configuration: config)
+        case .claude:
+            let base = ClaudeClientConfiguration.load()
+            let config = ClaudeClientConfiguration(
+                endpoint: base.endpoint,
+                model: modelId,
+                timeout: base.timeout,
+                apiVersion: base.apiVersion,
+                maxTokens: base.maxTokens,
+                keychainService: base.keychainService,
+                keychainAccount: base.keychainAccount
+            )
+            return ClaudeStreamingClient(configuration: config)
         }
     }
 
@@ -397,6 +437,12 @@ struct ChatPanel: View {
                 KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
                 EnvironmentAPIKeyProvider(environmentKey: model.provider.environmentKey)
             ])
+        case .claude:
+            let config = ClaudeClientConfiguration.load()
+            return CompositeAPIKeyProvider(providers: [
+                KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
+                EnvironmentAPIKeyProvider(environmentKey: model.provider.environmentKey)
+            ])
         }
     }
 
@@ -404,6 +450,9 @@ struct ChatPanel: View {
         switch model.provider {
         case .openAI:
             let config = OpenAIClientConfiguration.load()
+            return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
+        case .claude:
+            let config = ClaudeClientConfiguration.load()
             return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
         }
     }
@@ -426,6 +475,10 @@ struct ChatPanel: View {
     private func resetConversationIfNeeded() {
         guard selectionText != lastContext else { return }
         lastContext = selectionText
+        resetConversation()
+    }
+
+    private func resetConversation() {
         messages.removeAll()
         inputText = ""
         cancelStream()
@@ -569,6 +622,7 @@ struct APIKeyPrompt: View {
 
 enum LLMProvider: String, CaseIterable, Identifiable, Hashable {
     case openAI
+    case claude
 
     var id: String { rawValue }
 
@@ -576,6 +630,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .openAI:
             return "OpenAI"
+        case .claude:
+            return "Claude"
         }
     }
 
@@ -583,6 +639,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .openAI:
             return "OPENAI_API_KEY"
+        case .claude:
+            return "ANTHROPIC_API_KEY"
         }
     }
 
@@ -590,6 +648,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .openAI:
             return "OPENAI_API_KEY"
+        case .claude:
+            return "ANTHROPIC_API_KEY"
         }
     }
 }
@@ -604,6 +664,13 @@ struct LLMModel: Identifiable, Hashable {
         id: "gpt-4o",
         displayName: "GPT-4o",
         provider: .openAI,
+        isCustom: false
+    )
+
+    static let defaultClaude = LLMModel(
+        id: "claude-sonnet-4-5-20250929",
+        displayName: "Claude Sonnet 4.5",
+        provider: .claude,
         isCustom: false
     )
 
@@ -622,4 +689,50 @@ struct LLMModel: Identifiable, Hashable {
             isCustom: true
         )
     ]
+
+    static let claudeModels: [LLMModel] = [
+        defaultClaude,
+        LLMModel(
+            id: "claude-opus-4-5-20251101",
+            displayName: "Claude Opus 4.5",
+            provider: .claude,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "claude-haiku-4-5-20251001",
+            displayName: "Claude Haiku 4.5",
+            provider: .claude,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "claude-sonnet-4-20250514",
+            displayName: "Claude Sonnet 4",
+            provider: .claude,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "custom-claude",
+            displayName: "Custom (Claude)",
+            provider: .claude,
+            isCustom: true
+        )
+    ]
+
+    static func defaultModel(for provider: LLMProvider) -> LLMModel {
+        switch provider {
+        case .openAI:
+            return defaultOpenAI
+        case .claude:
+            return defaultClaude
+        }
+    }
+
+    static func models(for provider: LLMProvider) -> [LLMModel] {
+        switch provider {
+        case .openAI:
+            return openAIModels
+        case .claude:
+            return claudeModels
+        }
+    }
 }

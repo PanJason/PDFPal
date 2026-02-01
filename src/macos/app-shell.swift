@@ -30,6 +30,7 @@ struct AppShellView: View {
     @State private var selectionText = ""
     @State private var openErrorMessage = ""
     @State private var isShowingOpenError = false
+    @State private var selectedProvider: LLMProvider = .openAI
 
     var body: some View {
         HSplitView {
@@ -37,12 +38,8 @@ struct AppShellView: View {
             .frame(minWidth: 360)
 
             if isChatVisible {
-                OpenAILLMChatServing(
-                    documentId: documentId,
-                    selectionText: selectionText,
-                    onClose: { isChatVisible = false }
-                )
-                .frame(minWidth: 320)
+                activeChatPanel
+                    .frame(minWidth: 320)
             } else {
                 EmptyChatPlaceholder()
                     .frame(minWidth: 320)
@@ -53,6 +50,12 @@ struct AppShellView: View {
                 Button("Open PDF") {
                     isPickingFile = true
                 }
+                Picker("Model Family", selection: $selectedProvider) {
+                    ForEach(LLMProvider.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
+                    }
+                }
+                .pickerStyle(.menu)
                 Toggle("Show Chat", isOn: $isChatVisible)
             }
         }
@@ -87,6 +90,24 @@ struct AppShellView: View {
     private var documentId: String {
         fileURL?.lastPathComponent ?? "document"
     }
+
+    @ViewBuilder
+    private var activeChatPanel: some View {
+        switch selectedProvider {
+        case .openAI:
+            OpenAILLMChatServing(
+                documentId: documentId,
+                selectionText: selectionText,
+                onClose: { isChatVisible = false }
+            )
+        case .claude:
+            ClaudeLLMChatServing(
+                documentId: documentId,
+                selectionText: selectionText,
+                onClose: { isChatVisible = false }
+            )
+        }
+    }
 }
 
 struct OpenAILLMChatServing: View {
@@ -98,6 +119,22 @@ struct OpenAILLMChatServing: View {
         ChatPanel(
             documentId: documentId,
             selectionText: selectionText,
+            provider: .openAI,
+            onClose: onClose
+        )
+    }
+}
+
+struct ClaudeLLMChatServing: View {
+    let documentId: String
+    let selectionText: String
+    let onClose: () -> Void
+
+    var body: some View {
+        ChatPanel(
+            documentId: documentId,
+            selectionText: selectionText,
+            provider: .claude,
             onClose: onClose
         )
     }

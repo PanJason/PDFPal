@@ -36,7 +36,7 @@ enum LLMClientError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            return "Missing API key. Store it in Keychain or set OPENAI_API_KEY."
+            return "Missing API key. Store it in Keychain or set the provider environment key."
         case .invalidAPIKey:
             return "API key is empty or invalid."
         case .keychainError(let status):
