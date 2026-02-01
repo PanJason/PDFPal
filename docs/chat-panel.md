@@ -4,7 +4,8 @@
 The Chat Panel renders the right-side conversation UI for the macOS app. It
 shows the selected PDF context, a scrollable message list, an input composer,
 and UI states for loading and errors with retry. It includes a model picker,
-API key prompt, and streaming updates from the LLM service.
+API key prompt, per-provider session selection sidebar, and streaming updates
+from the LLM service.
 
 ## Public API
 ```swift
@@ -12,18 +13,19 @@ API key prompt, and streaming updates from the LLM service.
  * ChatPanel - Right-side conversation UI for Ask LLM flow
  * @documentId: Identifier for the open document session
  * @selectionText: Text selection captured from the PDF viewer
- * @provider: Selected model family for the chat panel
+ * @sessionStore: Session store for the selected model family
  * @onClose: Callback when the user closes the chat panel
  *
  * Renders a header, model picker, context card, message list, error banner,
  * and input composer. Streams responses from the LLM service and prompts
- * for an API key when needed.
+ * for an API key when needed. Displays a session sidebar for switching
+ * between sessions within the current model family.
  *
  * Example:
  *     ChatPanel(
  *         documentId: documentId,
  *         selectionText: selectionText,
- *         provider: .openAI,
+ *         sessionStore: openAISessionStore,
  *         onClose: closeChat
  *     )
  *
@@ -53,6 +55,15 @@ enum ChatRole {}
 struct APIKeyPrompt: View {}
 
 /**
+ * SessionSidebar - Session picker UI for the active provider
+ * @sessions: Ordered list of sessions for the provider
+ * @activeSessionId: Current session identifier
+ * @onSelect: Callback when a session is selected
+ * @onNewSession: Callback when a new session is created
+ */
+struct SessionSidebar: View {}
+
+/**
  * LLMProvider - LLM provider enumeration for model selection
  */
 enum LLMProvider {}
@@ -68,15 +79,17 @@ struct LLMModel: Identifiable {}
 ```
 
 ## State Management
-- `ChatPanel` owns local state for `messages`, `inputText`, `isSending`, and
+- `ChatPanel` owns transient state for `inputText`, `isSending`, and
   error information needed for the retry banner and streaming updates.
-- The panel resets its conversation when the selection text changes to reflect
-  a new Ask LLM invocation, and it resets when the provider changes.
+- Message history, model selection, and context live in a `SessionStore`
+  so each provider maintains its own session list.
+- The panel updates the active session context when selection text changes.
 - Model selection state drives the OpenAI or Claude streaming client configuration.
 
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers
   Ask LLM.
+- `sessionStore` is provided by `AppShellView` and scoped per model family.
 - Streaming responses use `OpenAIStreamingClient` or `ClaudeStreamingClient`
   from `src/macos/llm/`.
 - API keys are stored in Keychain via the prompt sheet.
@@ -86,7 +99,7 @@ struct LLMModel: Identifiable {}
 ChatPanel(
     documentId: documentId,
     selectionText: selectionText,
-    provider: .openAI,
+    sessionStore: openAISessionStore,
     onClose: closeChat
 )
 ```
