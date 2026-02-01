@@ -8,6 +8,9 @@ help me read purpose.
 ```bash
 make dev   # Run the macOS app via SwiftPM
 make build # Build the macOS app
+make release # Build a release .app bundle in dist/
+make package # Build and zip a release bundle in dist/
+make clean # Remove build artifacts and dist bundle
 ```
 
 ## Functionality 1:

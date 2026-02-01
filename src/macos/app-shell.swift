@@ -6,6 +6,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        applyAppIcon()
+    }
+
+    private func applyAppIcon() {
+        if let image = loadAppIconImage() {
+            NSApp.applicationIconImage = image
+        }
+    }
+
+    private func loadAppIconImage() -> NSImage? {
+        if let bundleURL = Bundle.main.url(forResource: "app_icon", withExtension: "png") {
+            return NSImage(contentsOf: bundleURL)
+        }
+
+        let currentDirectory = FileManager.default.currentDirectoryPath
+        let fallbackURL = URL(fileURLWithPath: "resource/app_icon.png", relativeTo: URL(fileURLWithPath: currentDirectory))
+        return NSImage(contentsOf: fallbackURL)
     }
 }
 

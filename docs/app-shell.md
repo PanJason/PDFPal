@@ -6,7 +6,8 @@ lifecycle, and split view layout that hosts the PDF panel and chat panel. It
 also handles file selection via the system file importer and manages the
 routing state that reveals the chat panel when an Ask LLM action occurs. It
 also exposes a model family picker in the toolbar and owns session stores for
-each model family.
+each model family. The app delegate also applies the app icon at launch using
+the bundled `app_icon.png` asset with a SwiftPM fallback for development.
 
 ## Public API
 ```swift
