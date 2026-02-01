@@ -12,6 +12,7 @@ API key prompt, and streaming updates from the LLM service.
  * ChatPanel - Right-side conversation UI for Ask LLM flow
  * @documentId: Identifier for the open document session
  * @selectionText: Text selection captured from the PDF viewer
+ * @provider: Selected model family for the chat panel
  * @onClose: Callback when the user closes the chat panel
  *
  * Renders a header, model picker, context card, message list, error banner,
@@ -22,6 +23,7 @@ API key prompt, and streaming updates from the LLM service.
  *     ChatPanel(
  *         documentId: documentId,
  *         selectionText: selectionText,
+ *         provider: .openAI,
  *         onClose: closeChat
  *     )
  *
@@ -69,13 +71,14 @@ struct LLMModel: Identifiable {}
 - `ChatPanel` owns local state for `messages`, `inputText`, `isSending`, and
   error information needed for the retry banner and streaming updates.
 - The panel resets its conversation when the selection text changes to reflect
-  a new Ask LLM invocation.
-- Model selection state drives the OpenAI streaming client configuration.
+  a new Ask LLM invocation, and it resets when the provider changes.
+- Model selection state drives the OpenAI or Claude streaming client configuration.
 
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers
   Ask LLM.
-- Streaming responses use `OpenAIStreamingClient` from `src/macos/llm/openai-client.swift`.
+- Streaming responses use `OpenAIStreamingClient` or `ClaudeStreamingClient`
+  from `src/macos/llm/`.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples
@@ -83,6 +86,7 @@ struct LLMModel: Identifiable {}
 ChatPanel(
     documentId: documentId,
     selectionText: selectionText,
+    provider: .openAI,
     onClose: closeChat
 )
 ```

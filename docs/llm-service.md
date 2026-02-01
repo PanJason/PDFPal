@@ -1,10 +1,10 @@
 # LLM Service Documentation
 
 ## Overview
-The LLM Service provides a streaming OpenAI GPT client for the macOS PoC. It
-exposes a small `LLMClient` protocol with mock and OpenAI streaming
-implementations, builds OpenAI Responses API requests, and emits incremental
-text deltas for the chat UI to render in real time.
+The LLM Service provides streaming OpenAI and Claude clients for the macOS
+PoC. It exposes a small `LLMClient` protocol with mock, OpenAI, and Claude
+streaming implementations, builds provider-specific requests, and emits
+incremental text deltas for the chat UI to render in real time.
 
 ## Public API
 ```swift
@@ -70,6 +70,26 @@ struct OpenAIClientConfiguration {}
 struct OpenAIStreamingClient {}
 
 /**
+ * ClaudeClientConfiguration - Claude Messages API configuration
+ * @endpoint: Messages API endpoint URL
+ * @model: Claude model identifier
+ * @timeout: Request timeout in seconds
+ * @apiVersion: Anthropic API version header value
+ * @maxTokens: Max tokens per response
+ * @keychainService: Keychain service for API key lookup
+ * @keychainAccount: Keychain account for API key lookup
+ */
+struct ClaudeClientConfiguration {}
+
+/**
+ * ClaudeStreamingClient - Claude client using streaming responses
+ * @configuration: Claude configuration options
+ * @apiKeyProvider: API key loader (Keychain/env)
+ * @session: URLSession used for network requests
+ */
+struct ClaudeStreamingClient {}
+
+/**
  * MockLLMClient - In-memory streaming mock for UI and tests
  */
 struct MockLLMClient {}
@@ -83,12 +103,15 @@ inside the call scope.
 ## Integration Points
 - `OpenAIStreamingClient` (in `src/macos/llm/openai-client.swift`) reads the API key from Keychain first, then falls back to
   `OPENAI_API_KEY` for development.
+- `ClaudeStreamingClient` (in `src/macos/llm/claude-client.swift`) reads the API key from Keychain first, then falls back to
+  `ANTHROPIC_API_KEY` for development.
 - API keys saved from the chat panel are stored in Keychain via `KeychainAPIKeyStore`.
-- Configuration is loaded from environment overrides: `OPENAI_API_ENDPOINT`,
-  `OPENAI_MODEL`, `OPENAI_TIMEOUT`, `OPENAI_KEYCHAIN_SERVICE`, and
-  `OPENAI_KEYCHAIN_ACCOUNT`.
-- The OpenAI Responses API is used with streaming events for incremental text
-  rendering.
+- Configuration is loaded from environment overrides:
+  - OpenAI: `OPENAI_API_ENDPOINT`, `OPENAI_MODEL`, `OPENAI_TIMEOUT`, `OPENAI_KEYCHAIN_SERVICE`, `OPENAI_KEYCHAIN_ACCOUNT`
+  - Claude: `ANTHROPIC_API_ENDPOINT`, `ANTHROPIC_MODEL`, `ANTHROPIC_TIMEOUT`, `ANTHROPIC_VERSION`,
+    `ANTHROPIC_MAX_TOKENS`, `ANTHROPIC_KEYCHAIN_SERVICE`, `ANTHROPIC_KEYCHAIN_ACCOUNT`
+- The OpenAI Responses API and Claude Messages API are used with streaming
+  events for incremental text rendering.
 
 ## Usage Examples
 ```swift
