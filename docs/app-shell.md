@@ -46,6 +46,6 @@ AppShellView()
 // Example of wiring the PDF panel with the chat panel.
 HSplitView {
     PDFViewer(fileURL: fileURL, onAskLLM: handleAskLLM)
-    ChatPanel(selectionText: selectionText, onClose: closeChat)
+    ChatPanel(documentId: documentId, selectionText: selectionText, onClose: closeChat)
 }
 ```

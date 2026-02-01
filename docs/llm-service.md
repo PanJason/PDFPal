@@ -38,6 +38,20 @@ enum LLMStreamEvent {}
 protocol LLMClient {}
 
 /**
+ * APIKeyStore - Key loader and saver for provider credentials
+ * @loadAPIKey: Load API key from storage
+ * @saveAPIKey: Save API key into storage
+ */
+protocol APIKeyStore {}
+
+/**
+ * KeychainAPIKeyStore - Keychain-backed API key storage
+ * @service: Keychain service name
+ * @account: Keychain account name
+ */
+struct KeychainAPIKeyStore {}
+
+/**
  * OpenAIClientConfiguration - OpenAI Responses API configuration
  * @endpoint: Responses API endpoint URL
  * @model: GPT model identifier
@@ -69,6 +83,7 @@ inside the call scope.
 ## Integration Points
 - `OpenAIStreamingClient` reads the API key from Keychain first, then falls back to
   `OPENAI_API_KEY` for development.
+- API keys saved from the chat panel are stored in Keychain via `KeychainAPIKeyStore`.
 - Configuration is loaded from environment overrides: `OPENAI_API_ENDPOINT`,
   `OPENAI_MODEL`, `OPENAI_TIMEOUT`, `OPENAI_KEYCHAIN_SERVICE`, and
   `OPENAI_KEYCHAIN_ACCOUNT`.
