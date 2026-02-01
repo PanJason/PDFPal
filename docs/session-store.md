@@ -17,6 +17,7 @@ backs the session sidebar on the right side of the chat panel.
  * @messages: Stored chat messages for the session
  * @selectedModel: Selected model within the provider
  * @customModelId: Custom model identifier when using a custom model
+ * @openPDFPath: File path of the PDF associated with the session
  */
 struct ChatSession: Identifiable {}
 
@@ -37,6 +38,8 @@ final class SessionStore: ObservableObject {}
   active session selection.
 - The chat panel reads the active session to render messages and model settings.
 - Session creation starts with empty messages and the current context selection.
+- Each session can store the path of its associated PDF so the app shell can
+  reopen documents when switching sessions.
 
 ## Integration Points
 - `AppShellView` owns one `SessionStore` per provider and passes it into

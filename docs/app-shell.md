@@ -33,6 +33,7 @@ struct AppShellView: View {}
  * OpenAILLMChatServing - OpenAI chat panel wrapper
  * @documentId: Identifier for the open document session
  * @selectionText: Text selection captured from the PDF viewer
+ * @openPDFPath: File path of the currently opened PDF
  * @sessionStore: Session store for OpenAI sessions
  * @onClose: Callback when the user closes the chat panel
  *
@@ -44,6 +45,7 @@ struct OpenAILLMChatServing: View {}
  * ClaudeLLMChatServing - Claude chat panel wrapper
  * @documentId: Identifier for the open document session
  * @selectionText: Text selection captured from the PDF viewer
+ * @openPDFPath: File path of the currently opened PDF
  * @sessionStore: Session store for Claude sessions
  * @onClose: Callback when the user closes the chat panel
  *
@@ -59,6 +61,8 @@ struct ClaudeLLMChatServing: View {}
 - `selectionText` is updated when `PDFViewer` invokes the Ask LLM callback.
 - `documentId` is derived from the selected file name and passed into the
   chat panel.
+- When a session is selected, the app shell reopens the session's associated
+  PDF path so the left panel follows the active session.
 
 ## Integration Points
 - PDF rendering and selection are provided by `PDFViewer` from
@@ -82,6 +86,7 @@ HSplitView {
     OpenAILLMChatServing(
         documentId: documentId,
         selectionText: selectionText,
+        openPDFPath: fileURL?.path,
         sessionStore: openAISessionStore,
         onClose: closeChat
     )

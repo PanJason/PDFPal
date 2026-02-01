@@ -14,6 +14,7 @@ session sidebar.
  * ChatPanel - Right-side conversation UI for Ask LLM flow
  * @documentId: Identifier for the open document session
  * @selectionText: Text selection captured from the PDF viewer
+ * @openPDFPath: File path of the currently opened PDF
  * @sessionStore: Session store for the selected model family
  * @onClose: Callback when the user closes the chat panel
  *
@@ -27,6 +28,7 @@ session sidebar.
  *     ChatPanel(
  *         documentId: documentId,
  *         selectionText: selectionText,
+ *         openPDFPath: fileURL?.path,
  *         sessionStore: openAISessionStore,
  *         onClose: closeChat
  *     )
@@ -92,6 +94,8 @@ struct LLMModel: Identifiable {}
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers
   Ask LLM.
+- `openPDFPath` is used when creating new sessions to associate them with the
+  active document.
 - `sessionStore` is provided by `AppShellView` and scoped per model family.
 - Streaming responses use `OpenAIStreamingClient` or `ClaudeStreamingClient`
   from `src/macos/llm/`.
