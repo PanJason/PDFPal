@@ -28,7 +28,8 @@ struct ChatSession: Identifiable {}
  * @activeSessionId: Currently selected session identifier
  *
  * Creates and selects new sessions, updates active session state, and
- * appends streamed messages during chat.
+ * appends streamed messages during chat. Supports deleting sessions and
+ * reassigning the active session.
  */
 final class SessionStore: ObservableObject {}
 ```
@@ -40,6 +41,8 @@ final class SessionStore: ObservableObject {}
 - Session creation starts with empty messages and the current context selection.
 - Each session can store the path of its associated PDF so the app shell can
   reopen documents when switching sessions.
+- Deleting a session removes it from the list and reassigns the active session
+  to the most recently created remaining session when needed.
 
 ## Integration Points
 - `AppShellView` owns one `SessionStore` per provider and passes it into
