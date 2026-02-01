@@ -64,6 +64,10 @@ protocol APIKeyProvider {
     func loadAPIKey() throws -> String
 }
 
+protocol APIKeyStore: APIKeyProvider {
+    func saveAPIKey(_ key: String) throws
+}
+
 struct KeychainAPIKeyProvider: APIKeyProvider {
     let service: String
     let account: String
@@ -91,6 +95,46 @@ struct KeychainAPIKeyProvider: APIKeyProvider {
             throw LLMClientError.invalidAPIKey
         }
         return key
+    }
+}
+
+struct KeychainAPIKeyStore: APIKeyStore {
+    let service: String
+    let account: String
+
+    func loadAPIKey() throws -> String {
+        try KeychainAPIKeyProvider(service: service, account: account).loadAPIKey()
+    }
+
+    func saveAPIKey(_ key: String) throws {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw LLMClientError.invalidAPIKey
+        }
+
+        let data = Data(trimmed.utf8)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+
+        let attributes: [String: Any] = [
+            kSecValueData as String: data
+        ]
+
+        let status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+            guard updateStatus == errSecSuccess else {
+                throw LLMClientError.keychainError(updateStatus)
+            }
+            return
+        }
+
+        guard status == errSecSuccess else {
+            throw LLMClientError.keychainError(status)
+        }
     }
 }
 
