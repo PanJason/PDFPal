@@ -94,6 +94,8 @@ struct LLMModel: Identifiable {}
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers
   Ask LLM.
+- Ask LLM updates the active session context only when the session matches the
+  open PDF; otherwise a new session is created if a provider key exists.
 - `openPDFPath` is used when creating new sessions to associate them with the
   active document.
 - `sessionStore` is provided by `AppShellView` and scoped per model family.

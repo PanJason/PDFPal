@@ -59,6 +59,8 @@ struct ClaudeLLMChatServing: View {}
   selection text, provider selection, and error presentation, plus
   `@StateObject` session stores for each provider.
 - `selectionText` is updated when `PDFViewer` invokes the Ask LLM callback.
+- Ask LLM only updates context on the active session when it matches the
+  current PDF; otherwise it creates a session only if a provider key exists.
 - `documentId` is derived from the selected file name and passed into the
   chat panel.
 - When a session is selected, the app shell reopens the session's associated

@@ -49,8 +49,8 @@ struct PDFEmptyState: View {}
 ## State Management
 - `PDFViewer` owns `@State` properties for the loaded `PDFDocument` and a
   user-facing load error message.
-- `PDFKitView` maintains the Ask LLM callback and queries its current selection
-  at menu invocation time.
+- `PDFKitView` maintains the Ask LLM callback and caches the latest selection
+  when building the context menu.
 
 ## Integration Points
 - The `onAskLLM` callback is wired to `AppShellView` to open the chat panel.
