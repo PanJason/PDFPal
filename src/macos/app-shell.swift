@@ -31,6 +31,8 @@ struct AppShellView: View {
     @State private var openErrorMessage = ""
     @State private var isShowingOpenError = false
     @State private var selectedProvider: LLMProvider = .openAI
+    @StateObject private var openAISessionStore = SessionStore(provider: .openAI)
+    @StateObject private var claudeSessionStore = SessionStore(provider: .claude)
 
     var body: some View {
         HSplitView {
@@ -98,12 +100,14 @@ struct AppShellView: View {
             OpenAILLMChatServing(
                 documentId: documentId,
                 selectionText: selectionText,
+                sessionStore: openAISessionStore,
                 onClose: { isChatVisible = false }
             )
         case .claude:
             ClaudeLLMChatServing(
                 documentId: documentId,
                 selectionText: selectionText,
+                sessionStore: claudeSessionStore,
                 onClose: { isChatVisible = false }
             )
         }
@@ -113,13 +117,14 @@ struct AppShellView: View {
 struct OpenAILLMChatServing: View {
     let documentId: String
     let selectionText: String
+    let sessionStore: SessionStore
     let onClose: () -> Void
 
     var body: some View {
         ChatPanel(
             documentId: documentId,
             selectionText: selectionText,
-            provider: .openAI,
+            sessionStore: sessionStore,
             onClose: onClose
         )
     }
@@ -128,13 +133,14 @@ struct OpenAILLMChatServing: View {
 struct ClaudeLLMChatServing: View {
     let documentId: String
     let selectionText: String
+    let sessionStore: SessionStore
     let onClose: () -> Void
 
     var body: some View {
         ChatPanel(
             documentId: documentId,
             selectionText: selectionText,
-            provider: .claude,
+            sessionStore: sessionStore,
             onClose: onClose
         )
     }

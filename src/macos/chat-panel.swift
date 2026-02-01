@@ -3,15 +3,13 @@ import SwiftUI
 struct ChatPanel: View {
     let documentId: String
     let selectionText: String
-    let provider: LLMProvider
     let onClose: () -> Void
+    @ObservedObject var sessionStore: SessionStore
 
-    @State private var messages: [ChatMessage] = []
     @State private var inputText = ""
     @State private var isSending = false
     @State private var errorMessage: String? = nil
     @State private var retryPrompt: String? = nil
-    @State private var lastContext = ""
     @State private var selectedModel: LLMModel
     @State private var customModelId = ""
     @State private var isAPIKeyAvailable = false
@@ -24,49 +22,64 @@ struct ChatPanel: View {
     init(
         documentId: String,
         selectionText: String,
-        provider: LLMProvider,
+        sessionStore: SessionStore,
         onClose: @escaping () -> Void
     ) {
         self.documentId = documentId
         self.selectionText = selectionText
-        self.provider = provider
+        self.sessionStore = sessionStore
         self.onClose = onClose
-        let defaultModel = LLMModel.defaultModel(for: provider)
-        _selectedModel = State(initialValue: defaultModel)
-        _keyPromptModel = State(initialValue: defaultModel)
+        let session = sessionStore.activeSession ?? sessionStore.createSession(
+            contextText: selectionText,
+            model: LLMModel.defaultModel(for: sessionStore.provider)
+        )
+        _selectedModel = State(initialValue: session.selectedModel)
+        _customModelId = State(initialValue: session.customModelId)
+        _keyPromptModel = State(initialValue: session.selectedModel)
+    }
+
+    private var provider: LLMProvider {
+        sessionStore.provider
+    }
+
+    private var activeMessages: [ChatMessage] {
+        sessionStore.activeSession?.messages ?? []
+    }
+
+    private var activeMessagesCount: Int {
+        sessionStore.activeSession?.messages.count ?? 0
+    }
+
+    private var activeContext: String {
+        sessionStore.activeSession?.contextText ?? selectionText
     }
 
     var body: some View {
-        VStack(spacing: 16) {
-            header
-            modelSelector
-            contextCard
+        HStack(spacing: 0) {
+            chatContent
             Divider()
-            messageList
-            errorBanner
-            inputBar
+            sessionSidebar
         }
-        .padding(20)
         .onAppear {
-            resetConversationIfNeeded()
-            updateKeyAvailability(for: selectedModel)
-            promptForKeyIfNeeded(for: selectedModel)
+            syncContextWithSelection()
+            loadSessionState()
         }
         .onChange(of: selectionText) { _ in
-            resetConversationIfNeeded()
+            syncContextWithSelection()
+        }
+        .onChange(of: sessionStore.activeSessionId) { _ in
+            loadSessionState()
         }
         .onChange(of: selectedModel) { newValue in
+            sessionStore.updateActiveSessionModel(newValue)
+            if !newValue.isCustom {
+                customModelId = ""
+            }
             updateKeyAvailability(for: newValue)
             promptForKeyIfNeeded(for: newValue)
         }
-        .onChange(of: provider) { newValue in
-            let defaultModel = LLMModel.defaultModel(for: newValue)
-            selectedModel = defaultModel
-            keyPromptModel = defaultModel
-            customModelId = ""
-            resetConversation()
-            updateKeyAvailability(for: defaultModel)
-            promptForKeyIfNeeded(for: defaultModel)
+        .onChange(of: customModelId) { newValue in
+            sessionStore.updateActiveSessionCustomModelId(newValue)
         }
         .sheet(isPresented: $isShowingKeyPrompt) {
             APIKeyPrompt(
@@ -79,6 +92,19 @@ struct ChatPanel: View {
         .onDisappear {
             cancelStream()
         }
+    }
+
+    private var chatContent: some View {
+        VStack(spacing: 16) {
+            header
+            modelSelector
+            contextCard
+            Divider()
+            messageList
+            errorBanner
+            inputBar
+        }
+        .padding(20)
     }
 
     private var header: some View {
@@ -147,13 +173,13 @@ struct ChatPanel: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    if messages.isEmpty && !isSending {
+                    if activeMessages.isEmpty && !isSending {
                         Text("Ask a question about the selection to start the conversation.")
                             .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, 8)
                     }
-                    ForEach(messages) { message in
+                    ForEach(activeMessages) { message in
                         ChatMessageRow(message: message)
                     }
                     if isSending && !hasReceivedDelta {
@@ -165,7 +191,7 @@ struct ChatPanel: View {
                 }
                 .padding(.vertical, 8)
             }
-            .onChange(of: messages.count) { _ in
+            .onChange(of: activeMessagesCount) { _ in
                 scrollToBottom(proxy)
             }
             .onChange(of: isSending) { _ in
@@ -230,6 +256,18 @@ struct ChatPanel: View {
         }
     }
 
+    private var sessionSidebar: some View {
+        SessionSidebar(
+            sessions: sessionStore.sessions,
+            activeSessionId: sessionStore.activeSessionId,
+            onSelect: { sessionId in
+                sessionStore.selectSession(sessionId)
+            },
+            onNewSession: createNewSession
+        )
+        .frame(width: 220)
+    }
+
     private var isSendDisabled: Bool {
         if isSending { return true }
         if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
@@ -238,9 +276,9 @@ struct ChatPanel: View {
     }
 
     private var contextText: String {
-        selectionText.isEmpty
+        activeContext.isEmpty
             ? "Select text in the PDF and choose Ask LLM to seed the conversation."
-            : selectionText
+            : activeContext
     }
 
     private func sendMessage() {
@@ -283,7 +321,7 @@ struct ChatPanel: View {
         hasReceivedDelta = false
 
         if appendUserMessage {
-            messages.append(ChatMessage(role: .user, text: prompt))
+            sessionStore.appendMessage(ChatMessage(role: .user, text: prompt))
         }
 
         let streamId = UUID()
@@ -292,7 +330,7 @@ struct ChatPanel: View {
 
         let request = LLMRequest(
             documentId: documentId,
-            selectionText: selectionText,
+            selectionText: activeContext,
             userPrompt: prompt,
             context: nil
         )
@@ -329,19 +367,23 @@ struct ChatPanel: View {
 
     private func appendAssistantDelta(_ delta: String, assistantId: UUID) {
         if !hasReceivedDelta {
-            messages.append(ChatMessage(id: assistantId, role: .assistant, text: delta))
+            sessionStore.appendMessage(ChatMessage(id: assistantId, role: .assistant, text: delta))
             hasReceivedDelta = true
-        } else if let index = messages.firstIndex(where: { $0.id == assistantId }) {
-            messages[index].text += delta
+        } else {
+            sessionStore.updateAssistantMessage(id: assistantId) { message in
+                message.text += delta
+            }
         }
     }
 
     private func finalizeAssistantMessage(_ text: String, assistantId: UUID) {
         if !hasReceivedDelta {
-            messages.append(ChatMessage(id: assistantId, role: .assistant, text: text))
+            sessionStore.appendMessage(ChatMessage(id: assistantId, role: .assistant, text: text))
             hasReceivedDelta = true
-        } else if let index = messages.firstIndex(where: { $0.id == assistantId }) {
-            messages[index].text = text
+        } else {
+            sessionStore.updateAssistantMessage(id: assistantId) { message in
+                message.text = text
+            }
         }
     }
 
@@ -359,6 +401,17 @@ struct ChatPanel: View {
             return trimmed.isEmpty ? nil : trimmed
         }
         return selectedModel.id
+    }
+
+    private func createNewSession() {
+        cancelStream()
+        let context = selectionText.isEmpty ? activeContext : selectionText
+        sessionStore.createSession(
+            contextText: context,
+            model: selectedModel,
+            customModelId: customModelId,
+            activate: true
+        )
     }
 
     private func makeClient(for model: LLMModel, modelId: String) -> any LLMClient {
@@ -466,20 +519,32 @@ struct ChatPanel: View {
     }
 
     private func removeTrailingAssistantMessage() {
-        if let last = messages.last, last.role == .assistant {
-            messages.removeLast()
-        }
+        sessionStore.removeTrailingAssistantMessage()
         hasReceivedDelta = false
     }
 
-    private func resetConversationIfNeeded() {
-        guard selectionText != lastContext else { return }
-        lastContext = selectionText
+    private func syncContextWithSelection() {
+        guard selectionText != activeContext else { return }
+        sessionStore.updateActiveSessionContext(selectionText)
         resetConversation()
     }
 
+    private func loadSessionState() {
+        resetTransientState()
+        guard let session = sessionStore.activeSession else { return }
+        selectedModel = session.selectedModel
+        customModelId = session.customModelId
+        keyPromptModel = session.selectedModel
+        updateKeyAvailability(for: session.selectedModel)
+        promptForKeyIfNeeded(for: session.selectedModel)
+    }
+
     private func resetConversation() {
-        messages.removeAll()
+        sessionStore.clearActiveSessionMessages()
+        resetTransientState()
+    }
+
+    private func resetTransientState() {
         inputText = ""
         cancelStream()
         errorMessage = nil
@@ -617,6 +682,62 @@ struct APIKeyPrompt: View {
                 isFocused = true
             }
         }
+    }
+}
+
+struct SessionSidebar: View {
+    let sessions: [ChatSession]
+    let activeSessionId: UUID?
+    let onSelect: (UUID) -> Void
+    let onNewSession: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Sessions")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    onNewSession()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+            Divider()
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(sessions) { session in
+                        Button {
+                            onSelect(session.id)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(session.title)
+                                    .font(.subheadline)
+                                Text(session.selectedModel.displayName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                            .background(backgroundColor(for: session))
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func backgroundColor(for session: ChatSession) -> Color {
+        session.id == activeSessionId
+            ? Color.accentColor.opacity(0.16)
+            : Color.secondary.opacity(0.08)
     }
 }
 
