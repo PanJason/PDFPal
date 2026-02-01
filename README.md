@@ -1,32 +1,98 @@
 # LLM Paper Reading Helper
 
-This repo is the source code for llm paper reading helper. The initial idea to
-have a lightweight PDF reader, which can work across macOS, iPadOS and iOS to 
-help me read purpose.
+A lightweight macOS PDF reader with an integrated LLM chat panel. Select text in a paper, invoke an LLM, and keep model-specific chat sessions alongside the document.
 
-## Development (macOS)
+## Features
+
+- Open and read local PDFs with PDFKit
+- Select text and invoke an LLM from a context menu
+- Split-view layout: PDF on the left, chat on the right
+- Model family and model selection (OpenAI + Claude today)
+- Session store per model family with a right-side session list
+- API key input stored locally in the Keychain
+
+## Table of Contents
+
+- [LLM Paper Reading Helper](#llm-paper-reading-helper)
+  - [Features](#features)
+  - [Table of Contents](#table-of-contents)
+  - [Project Structure](#project-structure)
+  - [Prerequisites](#prerequisites)
+  - [Getting Started](#getting-started)
+  - [Development](#development)
+  - [Build and Release](#build-and-release)
+  - [Packaging](#packaging)
+  - [Cleaning](#cleaning)
+  - [Configuration](#configuration)
+  - [License](#license)
+
+## Project Structure
+
+```txt
+LLMPaperReadingHelper
+├── src/
+│   └── macos/              # macOS SwiftUI app
+│       ├── app-shell.swift
+│       ├── chat-panel.swift
+│       ├── llm-client.swift
+│       ├── llm/
+│       │   ├── claude-client.swift
+│       │   └── openai-client.swift
+│       ├── pdf-viewer.swift
+│       └── session-store.swift
+├── docs/                   # Component docs
+├── resource/               # App resources (icon)
+├── dist/                   # Build artifacts
+├── Makefile
+└── Package.swift
+```
+
+## Prerequisites
+
+- macOS
+- Xcode with Swift toolchain
+- Swift Package Manager (included with Xcode)
+
+## Getting Started
+
+```bash
+git clone <your-repo-url>
+cd LLMPaperReadingHelper
+make dev
+```
+
+## Development
+
 ```bash
 make dev   # Run the macOS app via SwiftPM
-make build # Build the macOS app
+```
+
+## Build and Release
+
+```bash
+make build   # Build the macOS app
 make release # Build a release .app bundle in dist/
+```
+
+## Packaging
+
+```bash
 make package # Build and zip a release bundle in dist/
+```
+
+The output zip is placed in `dist/LLMPaperReadingHelper.zip`.
+
+## Cleaning
+
+```bash
 make clean # Remove build artifacts and dist bundle
 ```
 
-## Functionality 1:
-For macOS I want to be able to open the paper (pdf). Then I should be able to 
-select the context from the paper then if I right click. I will have the 
-following options:
-1. Highlight (Compatible with Preview on MacOS and chrome browser)
-2. Add notes (Compatible with Preview on MacOS and chrome browser)
-3. Invoke LLM with selected text. When clicked, one window is split to 
-two panels. One on the left with the open pdf, one on the right being the 
-chat interface with user selected LLM (default GPT). The select text 
-becomes by default context of the conversation. Then user can add more 
-context window in the input box on the right.
+## Configuration
 
-## Functionality 2:
-I should be able to add comments in the pdf. The comments should be compatible 
-with default pdf browser on macOS and chrome browser. When I open the comment 
-I have the option to render it as Latex on the right tab. If there is a
-rendering error, query the LLM to automatically fix it for me. 
+- API keys are entered in the app UI and stored locally in the Keychain.
+- Each model family maintains its own session list and chat history.
+
+## License
+
+Apache-2.0 License - see the [LICENSE](LICENSE) file for details.
