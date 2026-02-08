@@ -181,6 +181,7 @@ struct ChatPanel: View {
 
                 ScrollView {
                     Text(contextText)
+                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 4)
                 }
@@ -740,6 +741,7 @@ struct ChatMessageRow: View {
                 Text(message.text)
                     .font(.body)
                     .multilineTextAlignment(message.role == .user ? .trailing : .leading)
+                    .textSelection(.enabled)
 
                 contextToggleButton
             }
@@ -761,6 +763,7 @@ struct ChatMessageRow: View {
                 Text(contextText)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .textSelection(.enabled)
                     .padding(10)
                     .frame(width: bubbleWidth, alignment: .leading)
                     .background(Color.secondary.opacity(0.08))
