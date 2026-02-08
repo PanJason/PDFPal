@@ -100,6 +100,8 @@ struct LLMModel: Identifiable {}
   LLM requests. When enabled, either selection or context must be present.
   When disabled, only the typed prompt is sent.
 - Assistant messages align to the left, while user messages align to the right.
+- User messages that include context show a context icon on the bubble. Tapping
+  the icon reveals the stored context beneath the message.
 - Session rows show the associated PDF filename, a file icon that opens the
   containing folder in Finder, and a disclosure control that reveals the full
   path with a copy-to-clipboard shortcut.
