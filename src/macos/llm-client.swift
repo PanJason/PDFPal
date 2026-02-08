@@ -5,6 +5,7 @@ struct LLMRequest {
     let documentId: String
     let userPrompt: String
     let context: String?
+    let fileID: String?
 }
 
 struct LLMResponse {
@@ -19,6 +20,19 @@ enum LLMStreamEvent {
 protocol LLMClient {
     func send(request: LLMRequest) async throws -> LLMResponse
     func stream(request: LLMRequest) -> AsyncThrowingStream<LLMStreamEvent, Error>
+}
+
+protocol LLMFileAttachmentClient {
+    func ensureFileID(existingFileID: String?, filePath: String?) async throws -> String?
+    func deleteFileIfNeeded(fileID: String?) async throws
+}
+
+struct NoopFileAttachmentClient: LLMFileAttachmentClient {
+    func ensureFileID(existingFileID: String?, filePath: String?) async throws -> String? {
+        nil
+    }
+
+    func deleteFileIfNeeded(fileID: String?) async throws {}
 }
 
 enum LLMClientError: LocalizedError {
@@ -191,6 +205,7 @@ struct MockLLMClient: LLMClient {
                 let replyText = """
                 Mock response for: \(request.userPrompt)
                 Context length: \(request.context?.count ?? 0)
+                File id attached: \(request.fileID ?? "none")
                 """
 
                 do {

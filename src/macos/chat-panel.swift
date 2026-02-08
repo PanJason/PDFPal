@@ -417,13 +417,23 @@ struct ChatPanel: View {
         let request = LLMRequest(
             documentId: documentId,
             userPrompt: prompt,
-            context: contextForMessage
+            context: contextForMessage,
+            fileID: nil
         )
         let client = makeClient(for: selectedModel, modelId: modelId)
+        let sessionId = sessionStore.activeSessionId
 
         streamTask = Task {
             do {
-                for try await event in client.stream(request: request) {
+                let fileID = try await ensureFileIDIfNeeded(sessionId: sessionId, model: selectedModel)
+                let requestWithFile = LLMRequest(
+                    documentId: request.documentId,
+                    userPrompt: request.userPrompt,
+                    context: request.context,
+                    fileID: fileID
+                )
+
+                for try await event in client.stream(request: requestWithFile) {
                     try Task.checkCancellation()
                     await MainActor.run {
                         guard activeStreamId == streamId else { return }
@@ -633,7 +643,21 @@ struct ChatPanel: View {
 
     private func deleteSession(_ sessionId: UUID) {
         cancelStream()
+        let deletedSession = sessionStore.session(id: sessionId)
         sessionStore.deleteSession(sessionId)
+
+        guard let deletedSession else {
+            return
+        }
+
+        Task {
+            do {
+                let client = makeFileAttachmentClient(for: deletedSession.selectedModel)
+                try await client.deleteFileIfNeeded(fileID: deletedSession.fileID)
+            } catch {
+                // Local session removal should still succeed when remote cleanup fails.
+            }
+        }
     }
 
     private func renameSession(_ sessionId: UUID, title: String) {
@@ -690,6 +714,26 @@ struct ChatPanel: View {
             openPDFPath: openPDFPath,
             activate: true
         )
+    }
+
+    private func ensureFileIDIfNeeded(sessionId: UUID?, model: LLMModel) async throws -> String? {
+        guard let sessionId else { return nil }
+
+        let session = await MainActor.run {
+            sessionStore.session(id: sessionId)
+        }
+        guard let session else { return nil }
+
+        let client = makeFileAttachmentClient(for: model)
+        let fileID = try await client.ensureFileID(
+            existingFileID: session.fileID,
+            filePath: session.openPDFPath
+        )
+
+        await MainActor.run {
+            sessionStore.updateSessionFileID(sessionId, fileID: fileID)
+        }
+        return fileID
     }
 }
 

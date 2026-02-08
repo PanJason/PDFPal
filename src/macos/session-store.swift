@@ -11,6 +11,7 @@ struct ChatSession: Identifiable, Codable {
     var selectedModel: LLMModel
     var customModelId: String
     var openPDFPath: String?
+    var fileID: String?
 }
 
 final class SessionStore: ObservableObject {
@@ -56,7 +57,8 @@ final class SessionStore: ObservableObject {
             messages: [],
             selectedModel: resolvedModel,
             customModelId: resolvedModel.isCustom ? customModelId : "",
-            openPDFPath: openPDFPath
+            openPDFPath: openPDFPath,
+            fileID: nil
         )
         sessions.append(session)
         if activate {
@@ -78,6 +80,10 @@ final class SessionStore: ObservableObject {
                 .first?
                 .id
         }
+    }
+
+    func session(id: UUID) -> ChatSession? {
+        sessions.first(where: { $0.id == id })
     }
 
     func persistNow() {
@@ -118,6 +124,13 @@ final class SessionStore: ObservableObject {
         updateActiveSession { session in
             session.openPDFPath = openPDFPath
         }
+    }
+
+    func updateSessionFileID(_ id: UUID, fileID: String?) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        var session = sessions[index]
+        session.fileID = fileID
+        sessions[index] = session
     }
 
     func clearActiveSessionMessages() {

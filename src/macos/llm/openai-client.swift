@@ -178,7 +178,7 @@ struct OpenAIStreamingClient: LLMClient {
         let instructions = buildInstructions(for: request)
         let payload = OpenAIRequestBody(
             model: configuration.model,
-            input: request.userPrompt,
+            input: buildInput(for: request),
             instructions: instructions,
             stream: stream,
             metadata: request.documentId.isEmpty ? nil : ["document_id": request.documentId]
@@ -215,6 +215,19 @@ struct OpenAIStreamingClient: LLMClient {
         """
     }
 
+    private func buildInput(for request: LLMRequest) -> [OpenAIInputMessage] {
+        var content: [OpenAIInputContent] = []
+
+        if let fileID = request.fileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !fileID.isEmpty {
+            content.append(.inputFile(fileID))
+        }
+
+        content.append(.inputText(request.userPrompt))
+
+        return [OpenAIInputMessage(role: "user", content: content)]
+    }
+
     private func readAllBytes(from bytes: URLSession.AsyncBytes) async throws -> Data {
         var data = Data()
         for try await byte in bytes {
@@ -245,10 +258,35 @@ struct OpenAIStreamingClient: LLMClient {
 
 private struct OpenAIRequestBody: Encodable {
     let model: String
-    let input: String
+    let input: [OpenAIInputMessage]
     let instructions: String?
     let stream: Bool
     let metadata: [String: String]?
+}
+
+private struct OpenAIInputMessage: Encodable {
+    let role: String
+    let content: [OpenAIInputContent]
+}
+
+private struct OpenAIInputContent: Encodable {
+    let type: String
+    let text: String?
+    let fileID: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case fileID = "file_id"
+    }
+
+    static func inputText(_ text: String) -> OpenAIInputContent {
+        OpenAIInputContent(type: "input_text", text: text, fileID: nil)
+    }
+
+    static func inputFile(_ fileID: String) -> OpenAIInputContent {
+        OpenAIInputContent(type: "input_file", text: nil, fileID: fileID)
+    }
 }
 
 private struct OpenAIErrorResponse: Decodable {
@@ -291,4 +329,165 @@ private struct OpenAIStreamEventEnvelope: Decodable {
 
 private struct OpenAIStreamResponseContainer: Decodable {
     let error: OpenAIErrorResponse.Detail?
+}
+
+struct OpenAIFileClient {
+    let configuration: OpenAIClientConfiguration
+    let apiKeyProvider: any APIKeyProvider
+    let session: URLSession
+
+    init(
+        configuration: OpenAIClientConfiguration = .load(),
+        apiKeyProvider: (any APIKeyProvider)? = nil,
+        session: URLSession = .shared
+    ) {
+        self.configuration = configuration
+        let defaultProvider = CompositeAPIKeyProvider(providers: [
+            KeychainAPIKeyProvider(
+                service: configuration.keychainService,
+                account: configuration.keychainAccount
+            ),
+            EnvironmentAPIKeyProvider(environmentKey: "OPENAI_API_KEY")
+        ])
+        self.apiKeyProvider = apiKeyProvider ?? defaultProvider
+        self.session = session
+    }
+
+    func uploadFile(atPath path: String) async throws -> String {
+        let fileURL = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw LLMClientError.invalidRequest("PDF file not found at \(path).")
+        }
+
+        let fileData = try Data(contentsOf: fileURL)
+        let apiKey = try apiKeyProvider.loadAPIKey()
+        let endpoint = try filesEndpoint()
+        let boundary = "Boundary-\(UUID().uuidString)"
+        let body = makeMultipartBody(fileData: fileData, fileName: fileURL.lastPathComponent, boundary: boundary)
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = configuration.timeout
+        request.httpBody = body
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMClientError.remoteError("Missing HTTP response.")
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = parseErrorMessage(from: data)
+            throw LLMClientError.httpStatus(httpResponse.statusCode, message)
+        }
+
+        let parsed = try JSONDecoder().decode(OpenAIFileUploadResponse.self, from: data)
+        return parsed.id
+    }
+
+    func deleteFile(fileID: String) async throws {
+        let trimmed = fileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let apiKey = try apiKeyProvider.loadAPIKey()
+        let endpoint = try filesEndpoint().appendingPathComponent(trimmed)
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = configuration.timeout
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMClientError.remoteError("Missing HTTP response.")
+        }
+
+        // Treat not-found as already cleaned up.
+        if httpResponse.statusCode == 404 {
+            return
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = parseErrorMessage(from: data)
+            throw LLMClientError.httpStatus(httpResponse.statusCode, message)
+        }
+    }
+
+    private func filesEndpoint() throws -> URL {
+        guard var components = URLComponents(url: configuration.endpoint, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme,
+              scheme.hasPrefix("http"),
+              components.host != nil else {
+            throw LLMClientError.invalidEndpoint(configuration.endpoint.absoluteString)
+        }
+        components.query = nil
+        components.fragment = nil
+        components.path = "/v1/files"
+        guard let url = components.url else {
+            throw LLMClientError.invalidEndpoint(configuration.endpoint.absoluteString)
+        }
+        return url
+    }
+
+    private func makeMultipartBody(fileData: Data, fileName: String, boundary: String) -> Data {
+        var body = Data()
+
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"purpose\"\r\n\r\n".data(using: .utf8)!)
+        body.append("user_data\r\n".data(using: .utf8)!)
+
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/pdf\r\n\r\n".data(using: .utf8)!)
+        body.append(fileData)
+        body.append("\r\n".data(using: .utf8)!)
+
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        return body
+    }
+
+    private func parseErrorMessage(from data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        if let parsed = try? JSONDecoder().decode(OpenAIErrorResponse.self, from: data) {
+            return parsed.error?.message
+        }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+extension OpenAIFileClient: LLMFileAttachmentClient {
+    func ensureFileID(existingFileID: String?, filePath: String?) async throws -> String? {
+        if let existingFileID = existingFileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !existingFileID.isEmpty {
+            return existingFileID
+        }
+
+        guard let filePath = filePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !filePath.isEmpty else {
+            return nil
+        }
+
+        return try await uploadFile(atPath: filePath)
+    }
+
+    func deleteFileIfNeeded(fileID: String?) async throws {
+        guard let fileID = fileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !fileID.isEmpty else {
+            return
+        }
+        try await deleteFile(fileID: fileID)
+    }
+}
+
+func makeFileAttachmentClient(for model: LLMModel) -> any LLMFileAttachmentClient {
+    switch model.provider {
+    case .openAI:
+        return OpenAIFileClient(configuration: .load())
+    case .claude, .gemini:
+        return NoopFileAttachmentClient()
+    }
+}
+
+private struct OpenAIFileUploadResponse: Decodable {
+    let id: String
 }
