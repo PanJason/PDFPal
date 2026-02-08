@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ChatPanel: View {
@@ -814,9 +815,26 @@ struct SessionSidebar: View {
                                     Text(session.title)
                                         .font(.subheadline)
                                 }
-                                Text(session.selectedModel.displayName)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(session.selectedModel.displayName)
+                                    if let fileName = sessionFileName(session) {
+                                        HStack(spacing: 6) {
+                                            Text(fileName)
+                                            if let directoryURL = sessionDirectoryURL(session) {
+                                                Button {
+                                                    NSWorkspace.shared.open(directoryURL)
+                                                } label: {
+                                                    Image(systemName: "doc")
+                                                }
+                                                .buttonStyle(.plain)
+                                                .foregroundColor(.secondary)
+                                                .accessibilityLabel("Open containing folder")
+                                            }
+                                        }
+                                    }
+                                }
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                             }
                             Spacer()
                             if hoveringSessionId == session.id {
@@ -864,6 +882,16 @@ struct SessionSidebar: View {
         session.id == activeSessionId
             ? Color.accentColor.opacity(0.16)
             : Color.secondary.opacity(0.08)
+    }
+
+    private func sessionFileName(_ session: ChatSession) -> String? {
+        guard let path = session.openPDFPath else { return nil }
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private func sessionDirectoryURL(_ session: ChatSession) -> URL? {
+        guard let path = session.openPDFPath else { return nil }
+        return URL(fileURLWithPath: path).deletingLastPathComponent()
     }
 
     private func startRename(for session: ChatSession) {
