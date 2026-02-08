@@ -46,6 +46,7 @@ final class SessionStore: ObservableObject {}
   to the most recently created remaining session when needed.
 - Session data is written to Application Support as JSON per provider so
   sessions restore after relaunch.
+- Session titles can be updated to support user-defined naming.
 
 ## Integration Points
 - `AppShellView` owns one `SessionStore` per provider and passes it into
