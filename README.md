@@ -100,6 +100,7 @@ make clean # Remove build artifacts and dist bundle
 
 - API keys are entered in the app UI and stored locally in the Keychain.
 - Each model family maintains its own session list and chat history.
+- Supported model families: OpenAI, Claude, Gemini.
 
 ## License
 

@@ -1,10 +1,10 @@
 # LLM Service Documentation
 
 ## Overview
-The LLM Service provides streaming OpenAI and Claude clients for the macOS
-PoC. It exposes a small `LLMClient` protocol with mock, OpenAI, and Claude
-streaming implementations, builds provider-specific requests, and emits
-incremental text deltas for the chat UI to render in real time.
+The LLM Service provides streaming OpenAI, Claude, and Gemini clients for the
+macOS PoC. It exposes a small `LLMClient` protocol with mock, OpenAI, Claude,
+and Gemini streaming implementations, builds provider-specific requests, and
+emits incremental text deltas for the chat UI to render in real time.
 
 ## Public API
 ```swift
@@ -90,6 +90,25 @@ struct ClaudeClientConfiguration {}
 struct ClaudeStreamingClient {}
 
 /**
+ * GeminiClientConfiguration - Gemini API configuration
+ * @endpoint: Gemini API base endpoint URL
+ * @model: Gemini model identifier
+ * @timeout: Request timeout in seconds
+ * @maxTokens: Max tokens per response
+ * @keychainService: Keychain service for API key lookup
+ * @keychainAccount: Keychain account for API key lookup
+ */
+struct GeminiClientConfiguration {}
+
+/**
+ * GeminiStreamingClient - Gemini client using streaming responses
+ * @configuration: Gemini configuration options
+ * @apiKeyProvider: API key loader (Keychain/env)
+ * @session: URLSession used for network requests
+ */
+struct GeminiStreamingClient {}
+
+/**
  * MockLLMClient - In-memory streaming mock for UI and tests
  */
 struct MockLLMClient {}
@@ -105,13 +124,17 @@ inside the call scope.
   `OPENAI_API_KEY` for development.
 - `ClaudeStreamingClient` (in `src/macos/llm/claude-client.swift`) reads the API key from Keychain first, then falls back to
   `ANTHROPIC_API_KEY` for development.
+- `GeminiStreamingClient` (in `src/macos/llm/gemini-client.swift`) reads the API key from Keychain first, then falls back to
+  `GEMINI_API_KEY` for development.
 - API keys saved from the chat panel are stored in Keychain via `KeychainAPIKeyStore`.
 - Configuration is loaded from environment overrides:
   - OpenAI: `OPENAI_API_ENDPOINT`, `OPENAI_MODEL`, `OPENAI_TIMEOUT`, `OPENAI_KEYCHAIN_SERVICE`, `OPENAI_KEYCHAIN_ACCOUNT`
   - Claude: `ANTHROPIC_API_ENDPOINT`, `ANTHROPIC_MODEL`, `ANTHROPIC_TIMEOUT`, `ANTHROPIC_VERSION`,
     `ANTHROPIC_MAX_TOKENS`, `ANTHROPIC_KEYCHAIN_SERVICE`, `ANTHROPIC_KEYCHAIN_ACCOUNT`
+  - Gemini: `GEMINI_API_ENDPOINT`, `GEMINI_MODEL`, `GEMINI_TIMEOUT`, `GEMINI_MAX_TOKENS`,
+    `GEMINI_KEYCHAIN_SERVICE`, `GEMINI_KEYCHAIN_ACCOUNT`
 - The OpenAI Responses API and Claude Messages API are used with streaming
-  events for incremental text rendering.
+  events for incremental text rendering, along with the Gemini streaming API.
 
 ## Usage Examples
 ```swift

@@ -5,9 +5,10 @@ The macOS App Shell provides the SwiftUI application entry point, window
 lifecycle, and split view layout that hosts the PDF panel and chat panel. It
 also handles file selection via the system file importer and manages the
 routing state that reveals the chat panel when an Ask LLM action occurs. It
-also exposes a model family picker in the toolbar and owns session stores for
-each model family. The app delegate also applies the app icon at launch using
-the bundled `app_icon.png` asset with a SwiftPM fallback for development.
+also exposes a model family picker (OpenAI, Claude, Gemini) in the toolbar and
+owns session stores for each model family. The app delegate also applies the
+app icon at launch using the bundled `app_icon.png` asset with a SwiftPM
+fallback for development.
 
 ## Public API
 ```swift
@@ -52,6 +53,18 @@ struct OpenAILLMChatServing: View {}
  * Wraps the generic ChatPanel with Claude defaults.
  */
 struct ClaudeLLMChatServing: View {}
+
+/**
+ * GeminiLLMChatServing - Gemini chat panel wrapper
+ * @documentId: Identifier for the open document session
+ * @selectionText: Text selection captured from the PDF viewer
+ * @openPDFPath: File path of the currently opened PDF
+ * @sessionStore: Session store for Gemini sessions
+ * @onClose: Callback when the user closes the chat panel
+ *
+ * Wraps the generic ChatPanel with Gemini defaults.
+ */
+struct GeminiLLMChatServing: View {}
 ```
 
 ## State Management

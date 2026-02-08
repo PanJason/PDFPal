@@ -4,9 +4,9 @@
 The Chat Panel renders the right-side conversation UI for the macOS app. It
 shows the selected PDF context, a scrollable message list, an input composer,
 and UI states for loading and errors with retry. It includes a model picker,
-API key prompt, per-provider session selection sidebar, and streaming updates
-from the LLM service. A hover-only fold control lets the user hide or show the
-session sidebar.
+API key prompt, per-provider session selection sidebar (OpenAI, Claude,
+Gemini), and streaming updates from the LLM service. A hover-only fold control
+lets the user hide or show the session sidebar.
 
 ## Public API
 ```swift
