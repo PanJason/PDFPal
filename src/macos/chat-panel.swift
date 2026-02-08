@@ -866,7 +866,7 @@ struct SessionSidebar: View {
                                 .foregroundColor(.secondary)
                             }
                             Spacer()
-                            if hoveringSessionId == session.id {
+                            HStack(spacing: 6) {
                                 Button {
                                     startRename(for: session)
                                 } label: {
@@ -875,6 +875,7 @@ struct SessionSidebar: View {
                                 .buttonStyle(.borderless)
                                 .foregroundColor(.secondary)
                                 .accessibilityLabel("Rename session")
+                                .opacity(hoveringSessionId == session.id ? 1 : 0)
 
                                 Button {
                                     onDeleteSession(session.id)
@@ -884,6 +885,7 @@ struct SessionSidebar: View {
                                 .buttonStyle(.borderless)
                                 .foregroundColor(.secondary)
                                 .accessibilityLabel("Delete session")
+                                .opacity(hoveringSessionId == session.id ? 1 : 0)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
