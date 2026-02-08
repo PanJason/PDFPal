@@ -13,7 +13,7 @@ emits incremental text deltas for the chat UI to render in real time.
  * @documentId: Identifier for the active document session
  * @userPrompt: User prompt entered in the chat panel
  * @context: Optional context string from the session
- * @fileID: Optional uploaded file id attached to OpenAI input
+ * @fileID: Optional uploaded file id attached to provider input
  */
 struct LLMRequest {}
 
@@ -76,6 +76,14 @@ struct OpenAIStreamingClient {}
  * @session: URLSession used for network requests
  */
 struct OpenAIFileClient {}
+
+/**
+ * ClaudeFileClient - Claude Files API client for upload/delete
+ * @configuration: Claude configuration options
+ * @apiKeyProvider: API key loader (Keychain/env)
+ * @session: URLSession used for network requests
+ */
+struct ClaudeFileClient {}
 
 /**
  * ClaudeClientConfiguration - Claude Messages API configuration
@@ -145,8 +153,12 @@ inside the call scope.
   events for incremental text rendering, along with the Gemini streaming API.
 - OpenAI requests can include an uploaded file through `input_file` content
   blocks when `LLMRequest.fileID` is present.
+- Claude requests can include an uploaded file through `document` content
+  blocks when `LLMRequest.fileID` is present.
 - `OpenAIFileClient` uploads PDF files with `purpose=user_data` and deletes
   uploaded files when sessions are removed.
+- `ClaudeFileClient` uploads PDF files to the Claude Files API with the
+  `files-api-2025-04-14` beta header and deletes them when sessions are removed.
 
 ## Usage Examples
 ```swift
