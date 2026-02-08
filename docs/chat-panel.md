@@ -94,6 +94,8 @@ struct LLMModel: Identifiable {}
 - The session sidebar allows deleting sessions from the current model family.
 - Sessions can be renamed from the sidebar using a hover-only edit control.
 - The new-session control is disabled until the provider API key is available.
+- Session rows show the associated PDF filename and a file icon that opens the
+  containing folder in Finder.
 
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers
