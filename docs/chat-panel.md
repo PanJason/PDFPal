@@ -116,13 +116,14 @@ struct LLMModel: Identifiable {}
 - `openPDFPath` is used when creating new sessions to associate them with the
   active document.
 - `sessionStore` is provided by `AppShellView` and scoped per model family.
-- Streaming responses use `OpenAIStreamingClient` or `ClaudeStreamingClient`
-  from `src/macos/llm/`.
-- For OpenAI and Claude sessions, the panel uploads the session PDF to the
-  provider Files API before the first prompt, stores the returned `fileID` in
-  the session, and reuses it for later prompts.
-- Deleting an OpenAI or Claude session also attempts to delete its uploaded
-  file from the provider Files API.
+- Streaming responses use `OpenAIStreamingClient`,
+  `ClaudeStreamingClient`, or `GeminiStreamingClient` from
+  `src/macos/llm/`.
+- For OpenAI, Claude, and Gemini sessions, the panel uploads the session PDF
+  to the provider Files API before the first prompt, stores the returned
+  `fileID` in the session, and reuses it for later prompts.
+- Deleting an OpenAI, Claude, or Gemini session also attempts to delete its
+  uploaded file from the provider Files API.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples

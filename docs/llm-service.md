@@ -86,6 +86,14 @@ struct OpenAIFileClient {}
 struct ClaudeFileClient {}
 
 /**
+ * GeminiFileClient - Gemini Files API client for upload/delete
+ * @configuration: Gemini configuration options
+ * @apiKeyProvider: API key loader (Keychain/env)
+ * @session: URLSession used for network requests
+ */
+struct GeminiFileClient {}
+
+/**
  * ClaudeClientConfiguration - Claude Messages API configuration
  * @endpoint: Messages API endpoint URL
  * @model: Claude model identifier
@@ -155,10 +163,14 @@ inside the call scope.
   blocks when `LLMRequest.fileID` is present.
 - Claude requests can include an uploaded file through `document` content
   blocks when `LLMRequest.fileID` is present.
+- Gemini requests can include an uploaded file through `file_data.file_uri`
+  when `LLMRequest.fileID` is present (stored as URI).
 - `OpenAIFileClient` uploads PDF files with `purpose=user_data` and deletes
   uploaded files when sessions are removed.
 - `ClaudeFileClient` uploads PDF files to the Claude Files API with the
   `files-api-2025-04-14` beta header and deletes them when sessions are removed.
+- `GeminiFileClient` performs resumable file upload, waits until file state is
+  `ACTIVE`, and uses/deletes the returned file URI.
 
 ## Usage Examples
 ```swift
