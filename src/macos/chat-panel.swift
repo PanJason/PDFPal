@@ -732,10 +732,14 @@ struct ChatMessageRow: View {
             .padding(12)
             .background(bubbleColor)
             .cornerRadius(12)
-            .frame(maxWidth: 360, alignment: .leading)
+            .frame(maxWidth: 360, alignment: message.role == .user ? .trailing : .leading)
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.primary.opacity(0.06))
+                Group {
+                    if message.role == .assistant {
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.primary.opacity(0.06))
+                    }
+                }
             )
     }
 
