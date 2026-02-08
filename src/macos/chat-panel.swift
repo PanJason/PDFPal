@@ -755,14 +755,6 @@ struct ChatMessageRow: View {
                 guard message.role == .user else { return }
                 measuredBubbleWidth = width
             }
-            .overlay(
-                Group {
-                    if message.role == .assistant {
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.primary.opacity(0.06))
-                    }
-                }
-            )
 
             if isContextExpanded, let contextText = message.contextText, !contextText.isEmpty {
                 Text(contextText)
