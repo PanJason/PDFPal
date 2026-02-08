@@ -44,6 +44,7 @@ struct AppShellView: View {
     @State private var isPickingFile = false
     @State private var fileURL: URL? = nil
     @State private var isChatVisible = false
+    @State private var isSessionSidebarVisible = true
     @State private var selectionText = ""
     @State private var openErrorMessage = ""
     @State private var isShowingOpenError = false
@@ -76,7 +77,13 @@ struct AppShellView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                Toggle("Show Chat", isOn: $isChatVisible)
+                Menu {
+                    Toggle("Chat Panel", isOn: $isChatVisible)
+                    Toggle("Sessions Sidebar", isOn: $isSessionSidebarVisible)
+                        .disabled(!isChatVisible)
+                } label: {
+                    Image(systemName: "sidebar.squares.left")
+                }
             }
         }
         .fileImporter(
@@ -244,6 +251,7 @@ struct AppShellView: View {
                 selectionText: selectionText,
                 openPDFPath: fileURL?.path,
                 sessionStore: openAISessionStore,
+                isSessionSidebarVisible: $isSessionSidebarVisible,
                 onClose: { isChatVisible = false }
             )
         case .claude:
@@ -252,6 +260,7 @@ struct AppShellView: View {
                 selectionText: selectionText,
                 openPDFPath: fileURL?.path,
                 sessionStore: claudeSessionStore,
+                isSessionSidebarVisible: $isSessionSidebarVisible,
                 onClose: { isChatVisible = false }
             )
         case .gemini:
@@ -260,6 +269,7 @@ struct AppShellView: View {
                 selectionText: selectionText,
                 openPDFPath: fileURL?.path,
                 sessionStore: geminiSessionStore,
+                isSessionSidebarVisible: $isSessionSidebarVisible,
                 onClose: { isChatVisible = false }
             )
         }
@@ -271,6 +281,7 @@ struct OpenAILLMChatServing: View {
     let selectionText: String
     let openPDFPath: String?
     let sessionStore: SessionStore
+    let isSessionSidebarVisible: Binding<Bool>
     let onClose: () -> Void
 
     var body: some View {
@@ -279,6 +290,7 @@ struct OpenAILLMChatServing: View {
             selectionText: selectionText,
             openPDFPath: openPDFPath,
             sessionStore: sessionStore,
+            isSessionSidebarVisible: isSessionSidebarVisible,
             onClose: onClose
         )
     }
@@ -289,6 +301,7 @@ struct ClaudeLLMChatServing: View {
     let selectionText: String
     let openPDFPath: String?
     let sessionStore: SessionStore
+    let isSessionSidebarVisible: Binding<Bool>
     let onClose: () -> Void
 
     var body: some View {
@@ -297,6 +310,7 @@ struct ClaudeLLMChatServing: View {
             selectionText: selectionText,
             openPDFPath: openPDFPath,
             sessionStore: sessionStore,
+            isSessionSidebarVisible: isSessionSidebarVisible,
             onClose: onClose
         )
     }
@@ -307,6 +321,7 @@ struct GeminiLLMChatServing: View {
     let selectionText: String
     let openPDFPath: String?
     let sessionStore: SessionStore
+    let isSessionSidebarVisible: Binding<Bool>
     let onClose: () -> Void
 
     var body: some View {
@@ -315,6 +330,7 @@ struct GeminiLLMChatServing: View {
             selectionText: selectionText,
             openPDFPath: openPDFPath,
             sessionStore: sessionStore,
+            isSessionSidebarVisible: isSessionSidebarVisible,
             onClose: onClose
         )
     }

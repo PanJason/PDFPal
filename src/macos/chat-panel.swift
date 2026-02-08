@@ -20,7 +20,7 @@ struct ChatPanel: View {
     @State private var streamTask: Task<Void, Never>? = nil
     @State private var activeStreamId: UUID? = nil
     @State private var hasReceivedDelta = false
-    @State private var isSessionSidebarVisible = true
+    @Binding var isSessionSidebarVisible: Bool
     @State private var isHoveringFoldHandle = false
     @State private var sessionSidebarWidth: CGFloat = 220
     @State private var isHoveringSidebarDivider = false
@@ -30,12 +30,14 @@ struct ChatPanel: View {
         selectionText: String,
         openPDFPath: String?,
         sessionStore: SessionStore,
+        isSessionSidebarVisible: Binding<Bool>,
         onClose: @escaping () -> Void
     ) {
         self.documentId = documentId
         self.selectionText = selectionText
         self.openPDFPath = openPDFPath
         self.sessionStore = sessionStore
+        self._isSessionSidebarVisible = isSessionSidebarVisible
         self.onClose = onClose
         let session = sessionStore.activeSession
         _selectedModel = State(initialValue: session?.selectedModel ?? LLMModel.defaultModel(for: sessionStore.provider))
