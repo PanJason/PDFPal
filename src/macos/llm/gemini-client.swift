@@ -111,14 +111,6 @@ struct GeminiStreamingClient: LLMClient {
                         if payload == "[DONE]" { break }
 
                         let chunk = try decodeStreamEvent(from: String(payload))
-                        if let finishReason = chunk.candidates?.first?.finishReason,
-                           !finishReason.isEmpty {
-                            if !accumulated.isEmpty {
-                                continuation.yield(.completed(LLMResponse(replyText: accumulated)))
-                                finish()
-                                return
-                            }
-                        }
 
                         let text = chunk.candidates?
                             .first?
@@ -126,19 +118,29 @@ struct GeminiStreamingClient: LLMClient {
                             .parts?
                             .compactMap { $0.text }
                             .joined() ?? ""
-                        guard !text.isEmpty else { continue }
 
-                        let delta: String
-                        if text.hasPrefix(accumulated) {
-                            delta = String(text.dropFirst(accumulated.count))
-                            accumulated = text
-                        } else {
-                            delta = text
-                            accumulated += text
+                        if !text.isEmpty {
+                            let delta: String
+                            if text.hasPrefix(accumulated) {
+                                delta = String(text.dropFirst(accumulated.count))
+                                accumulated = text
+                            } else {
+                                delta = text
+                                accumulated += text
+                            }
+
+                            if !delta.isEmpty {
+                                continuation.yield(.textDelta(delta))
+                            }
                         }
 
-                        if !delta.isEmpty {
-                            continuation.yield(.textDelta(delta))
+                        if let finishReason = chunk.candidates?.first?.finishReason,
+                           !finishReason.isEmpty {
+                            if !accumulated.isEmpty {
+                                continuation.yield(.completed(LLMResponse(replyText: accumulated)))
+                            }
+                            finish()
+                            return
                         }
                     }
 
