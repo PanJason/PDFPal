@@ -99,6 +99,7 @@ struct LLMModel: Identifiable {}
 - The context card includes a toggle to include or omit context text from
   LLM requests. When enabled, either selection or context must be present.
   When disabled, only the typed prompt is sent.
+- Assistant messages align to the left, while user messages align to the right.
 - Session rows show the associated PDF filename, a file icon that opens the
   containing folder in Finder, and a disclosure control that reveals the full
   path with a copy-to-clipboard shortcut.
