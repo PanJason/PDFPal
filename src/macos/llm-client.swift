@@ -35,6 +35,17 @@ struct NoopFileAttachmentClient: LLMFileAttachmentClient {
     func deleteFileIfNeeded(fileID: String?) async throws {}
 }
 
+func makeFileAttachmentClient(for model: LLMModel) -> any LLMFileAttachmentClient {
+    switch model.provider {
+    case .openAI:
+        return OpenAIFileClient(configuration: .load())
+    case .claude:
+        return ClaudeFileClient(configuration: .load())
+    case .gemini:
+        return GeminiFileClient(configuration: .load())
+    }
+}
+
 enum LLMClientError: LocalizedError {
     case missingAPIKey
     case invalidAPIKey

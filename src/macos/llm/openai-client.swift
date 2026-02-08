@@ -479,17 +479,6 @@ extension OpenAIFileClient: LLMFileAttachmentClient {
     }
 }
 
-func makeFileAttachmentClient(for model: LLMModel) -> any LLMFileAttachmentClient {
-    switch model.provider {
-    case .openAI:
-        return OpenAIFileClient(configuration: .load())
-    case .claude:
-        return ClaudeFileClient(configuration: .load())
-    case .gemini:
-        return GeminiFileClient(configuration: .load())
-    }
-}
-
 private struct OpenAIFileUploadResponse: Decodable {
     let id: String
 }
