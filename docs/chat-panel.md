@@ -16,6 +16,7 @@ lets the user hide or show the session sidebar.
  * @selectionText: Text selection captured from the PDF viewer
  * @openPDFPath: File path of the currently opened PDF
  * @sessionStore: Session store for the selected model family
+ * @isSessionSidebarVisible: Binding that controls session sidebar visibility
  * @onClose: Callback when the user closes the chat panel
  *
  * Renders a header, model picker, context card, message list, error banner,
@@ -30,6 +31,7 @@ lets the user hide or show the session sidebar.
  *         selectionText: selectionText,
  *         openPDFPath: fileURL?.path,
  *         sessionStore: openAISessionStore,
+ *         isSessionSidebarVisible: $isSessionSidebarVisible,
  *         onClose: closeChat
  *     )
  *
