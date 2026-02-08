@@ -719,6 +719,8 @@ struct ChatMessageRow: View {
     let message: ChatMessage
     @State private var isContextExpanded = false
     @State private var measuredBubbleWidth: CGFloat = 0
+    private let bubblePadding: CGFloat = 12
+    private let bubbleMaxWidth: CGFloat = 360
 
     var body: some View {
         HStack {
@@ -741,10 +743,10 @@ struct ChatMessageRow: View {
 
                 contextToggleButton
             }
-            .padding(12)
+            .padding(bubblePadding)
             .background(bubbleColor)
             .cornerRadius(12)
-            .frame(maxWidth: 360, alignment: message.role == .user ? .trailing : .leading)
+            .frame(maxWidth: bubbleMaxWidth, alignment: message.role == .user ? .trailing : .leading)
             .background(
                 GeometryReader { proxy in
                     Color.clear
@@ -752,7 +754,6 @@ struct ChatMessageRow: View {
                 }
             )
             .onPreferenceChange(BubbleWidthKey.self) { width in
-                guard message.role == .user else { return }
                 measuredBubbleWidth = width
             }
 
@@ -776,7 +777,7 @@ struct ChatMessageRow: View {
     }
 
     private var bubbleWidth: CGFloat? {
-        guard message.role == .user, measuredBubbleWidth > 0 else { return nil }
+        guard measuredBubbleWidth > 0 else { return nil }
         return measuredBubbleWidth
     }
 
@@ -790,18 +791,22 @@ struct ChatMessageRow: View {
                         isContextExpanded.toggle()
                     }
                 } label: {
-                    HStack(spacing: 6) {
-                        Text("Context")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        Image(systemName: "text.quote")
-                            .imageScale(.small)
-                            .foregroundColor(.secondary)
-                    }
+                    contextToggleLabel
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isContextExpanded ? "Hide context" : "Show context")
             }
+        }
+    }
+
+    private var contextToggleLabel: some View {
+        HStack(spacing: 6) {
+            Text("Context")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Image(systemName: "text.quote")
+                .imageScale(.small)
+                .foregroundColor(.secondary)
         }
     }
 }
