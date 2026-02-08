@@ -97,6 +97,8 @@ struct LLMModel: Identifiable {}
 - Session rows show the associated PDF filename, a file icon that opens the
   containing folder in Finder, and a disclosure control that reveals the full
   path with a copy-to-clipboard shortcut.
+- The session sidebar width is resizable by dragging the divider between the
+  chat panel and the session list.
 
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers

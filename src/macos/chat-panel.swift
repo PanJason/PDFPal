@@ -22,6 +22,8 @@ struct ChatPanel: View {
     @State private var hasReceivedDelta = false
     @State private var isSessionSidebarVisible = true
     @State private var isHoveringFoldHandle = false
+    @State private var sessionSidebarWidth: CGFloat = 220
+    @State private var isHoveringSidebarDivider = false
 
     init(
         documentId: String,
@@ -61,7 +63,7 @@ struct ChatPanel: View {
         HStack(spacing: 0) {
             chatContent
             if isSessionSidebarVisible {
-                Divider()
+                sidebarDivider
                 sessionSidebar
             }
         }
@@ -278,7 +280,35 @@ struct ChatPanel: View {
             onRenameSession: renameSession,
             canCreateSession: isAPIKeyAvailable
         )
-        .frame(width: 220)
+        .frame(width: sessionSidebarWidth)
+    }
+
+    private var sidebarDivider: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.3))
+            .frame(width: 1)
+            .overlay(
+                Rectangle()
+                    .fill(Color.clear)
+                    .frame(width: 8)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                let nextWidth = sessionSidebarWidth - value.translation.width
+                                sessionSidebarWidth = min(max(nextWidth, 180), 360)
+                            }
+                    )
+                    .onHover { hovering in
+                        if hovering && !isHoveringSidebarDivider {
+                            NSCursor.resizeLeftRight.push()
+                            isHoveringSidebarDivider = true
+                        } else if !hovering && isHoveringSidebarDivider {
+                            NSCursor.pop()
+                            isHoveringSidebarDivider = false
+                        }
+                    }
+            )
     }
 
     private var foldHandle: some View {
