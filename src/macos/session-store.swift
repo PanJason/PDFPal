@@ -90,6 +90,15 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    func updateSessionTitle(_ id: UUID, title: String) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var session = sessions[index]
+        session.title = trimmed
+        sessions[index] = session
+    }
+
     func updateActiveSessionModel(_ model: LLMModel) {
         updateActiveSession { session in
             session.selectedModel = model

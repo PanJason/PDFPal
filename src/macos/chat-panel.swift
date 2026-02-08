@@ -274,6 +274,7 @@ struct ChatPanel: View {
             },
             onNewSession: createNewSession,
             onDeleteSession: deleteSession,
+            onRenameSession: renameSession,
             canCreateSession: isAPIKeyAvailable
         )
         .frame(width: 220)
@@ -584,6 +585,10 @@ struct ChatPanel: View {
         sessionStore.deleteSession(sessionId)
     }
 
+    private func renameSession(_ sessionId: UUID, title: String) {
+        sessionStore.updateSessionTitle(sessionId, title: title)
+    }
+
     private func syncContextWithSelection(using text: String? = nil) {
         let newContext = text ?? selectionText
         let trimmed = newContext.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -770,9 +775,12 @@ struct SessionSidebar: View {
     let onSelect: (UUID) -> Void
     let onNewSession: () -> Void
     let onDeleteSession: (UUID) -> Void
+    let onRenameSession: (UUID, String) -> Void
     let canCreateSession: Bool
 
     @State private var hoveringSessionId: UUID? = nil
+    @State private var renamingSessionId: UUID? = nil
+    @State private var renameDraft = ""
 
     var body: some View {
         VStack(spacing: 12) {
@@ -796,14 +804,31 @@ struct SessionSidebar: View {
                     ForEach(sessions) { session in
                         HStack(spacing: 8) {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(session.title)
-                                    .font(.subheadline)
+                                if renamingSessionId == session.id {
+                                    TextField("Session name", text: $renameDraft)
+                                        .textFieldStyle(.roundedBorder)
+                                        .onSubmit {
+                                            commitRename(for: session)
+                                        }
+                                } else {
+                                    Text(session.title)
+                                        .font(.subheadline)
+                                }
                                 Text(session.selectedModel.displayName)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
                             Spacer()
                             if hoveringSessionId == session.id {
+                                Button {
+                                    startRename(for: session)
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundColor(.secondary)
+                                .accessibilityLabel("Rename session")
+
                                 Button {
                                     onDeleteSession(session.id)
                                 } label: {
@@ -839,6 +864,21 @@ struct SessionSidebar: View {
         session.id == activeSessionId
             ? Color.accentColor.opacity(0.16)
             : Color.secondary.opacity(0.08)
+    }
+
+    private func startRename(for session: ChatSession) {
+        renamingSessionId = session.id
+        renameDraft = session.title
+    }
+
+    private func commitRename(for session: ChatSession) {
+        let trimmed = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            renameDraft = session.title
+        } else {
+            onRenameSession(session.id, trimmed)
+        }
+        renamingSessionId = nil
     }
 }
 
