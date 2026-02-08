@@ -111,31 +111,37 @@ struct ClaudeStreamingClient: LLMClient {
                         }
 
                         guard !pendingDataLines.isEmpty else { return }
-                        let payload = pendingDataLines.joined(separator: "\n")
-                        if payload == "[DONE]" { return }
 
-                        let envelope = try decodeStreamEvent(from: payload)
-                        switch envelope.type {
-                        case "content_block_delta":
-                            if envelope.delta?.type == "text_delta",
-                               let delta = envelope.delta?.text,
-                               !delta.isEmpty {
-                                accumulated += delta
-                                continuation.yield(.textDelta(delta))
+                        for payload in pendingDataLines {
+                            if payload == "[DONE]" { continue }
+
+                            let envelope = try decodeStreamEvent(from: payload)
+                            switch envelope.type {
+                            case "ping":
+                                // No-op: ping events keep the connection alive
+                                break
+                            case "content_block_delta":
+                                if envelope.delta?.type == "text_delta",
+                                   let delta = envelope.delta?.text,
+                                   !delta.isEmpty {
+                                    accumulated += delta
+                                    continuation.yield(.textDelta(delta))
+                                }
+                            case "message_stop":
+                                let replyText = accumulated
+                                if !replyText.isEmpty {
+                                    continuation.yield(.completed(LLMResponse(replyText: replyText)))
+                                    finish()
+                                } else {
+                                    throw LLMClientError.emptyResponse
+                                }
+                            case "error":
+                                let message = envelope.error?.message ?? "Claude error."
+                                throw LLMClientError.remoteError(message)
+                            default:
+                                // Ignore other event types (message_start, content_block_start, content_block_stop, message_delta)
+                                break
                             }
-                        case "message_stop":
-                            let replyText = accumulated
-                            if !replyText.isEmpty {
-                                continuation.yield(.completed(LLMResponse(replyText: replyText)))
-                                finish()
-                            } else {
-                                throw LLMClientError.emptyResponse
-                            }
-                        case "error":
-                            let message = envelope.error?.message ?? "Claude error."
-                            throw LLMClientError.remoteError(message)
-                        default:
-                            break
                         }
                     }
 
