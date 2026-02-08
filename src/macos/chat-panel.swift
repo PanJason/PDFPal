@@ -24,6 +24,7 @@ struct ChatPanel: View {
     @State private var isHoveringFoldHandle = false
     @State private var sessionSidebarWidth: CGFloat = 220
     @State private var isHoveringSidebarDivider = false
+    @State private var includeContextInRequest = true
 
     init(
         documentId: String,
@@ -174,12 +175,17 @@ struct ChatPanel: View {
 
     private var contextCard: some View {
         GroupBox(label: Label("Context", systemImage: "doc.text.magnifyingglass")) {
-            ScrollView {
-                Text(contextText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 4)
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Include context in request", isOn: $includeContextInRequest)
+                    .toggleStyle(.checkbox)
+
+                ScrollView {
+                    Text(contextText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 4)
+                }
+                .frame(maxHeight: 140)
             }
-            .frame(maxHeight: 140)
         }
     }
 
@@ -375,6 +381,15 @@ struct ChatPanel: View {
             return false
         }
 
+        if includeContextInRequest {
+            let selection = selectionText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let contextCandidate = activeContext.trimmingCharacters(in: .whitespacesAndNewlines)
+            if selection.isEmpty && contextCandidate.isEmpty {
+                errorMessage = "Select text or add context before sending."
+                return false
+            }
+        }
+
         guard ensureAPIKeyAvailable(for: selectedModel) else { return false }
         return true
     }
@@ -395,11 +410,12 @@ struct ChatPanel: View {
         activeStreamId = streamId
         let assistantId = UUID()
 
+        let contextCandidate = activeContext.trimmingCharacters(in: .whitespacesAndNewlines)
         let request = LLMRequest(
             documentId: documentId,
-            selectionText: activeContext,
+            selectionText: includeContextInRequest ? selectionText : "",
             userPrompt: prompt,
-            context: nil
+            context: includeContextInRequest && !contextCandidate.isEmpty ? activeContext : nil
         )
         let client = makeClient(for: selectedModel, modelId: modelId)
 

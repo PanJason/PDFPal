@@ -168,10 +168,6 @@ struct GeminiStreamingClient: LLMClient {
         guard !trimmedPrompt.isEmpty else {
             throw LLMClientError.invalidRequest("Prompt is empty.")
         }
-        if request.selectionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           request.context?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-            throw LLMClientError.invalidRequest("Selection is empty and no context was provided.")
-        }
     }
 
     private func buildURLRequest(
