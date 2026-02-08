@@ -13,6 +13,7 @@ emits incremental text deltas for the chat UI to render in real time.
  * @documentId: Identifier for the active document session
  * @userPrompt: User prompt entered in the chat panel
  * @context: Optional context string from the session
+ * @fileID: Optional uploaded file id attached to OpenAI input
  */
 struct LLMRequest {}
 
@@ -67,6 +68,14 @@ struct OpenAIClientConfiguration {}
  * @session: URLSession used for network requests
  */
 struct OpenAIStreamingClient {}
+
+/**
+ * OpenAIFileClient - OpenAI Files API client for upload/delete
+ * @configuration: OpenAI configuration options
+ * @apiKeyProvider: API key loader (Keychain/env)
+ * @session: URLSession used for network requests
+ */
+struct OpenAIFileClient {}
 
 /**
  * ClaudeClientConfiguration - Claude Messages API configuration
@@ -134,6 +143,10 @@ inside the call scope.
     `GEMINI_KEYCHAIN_SERVICE`, `GEMINI_KEYCHAIN_ACCOUNT`
 - The OpenAI Responses API and Claude Messages API are used with streaming
   events for incremental text rendering, along with the Gemini streaming API.
+- OpenAI requests can include an uploaded file through `input_file` content
+  blocks when `LLMRequest.fileID` is present.
+- `OpenAIFileClient` uploads PDF files with `purpose=user_data` and deletes
+  uploaded files when sessions are removed.
 
 ## Usage Examples
 ```swift
@@ -141,7 +154,8 @@ let client = OpenAIStreamingClient()
 let request = LLMRequest(
     documentId: "paper-123",
     userPrompt: "Summarize the main contribution.",
-    context: contextText
+    context: contextText,
+    fileID: "file-abc123"
 )
 
 Task {

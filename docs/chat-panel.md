@@ -118,6 +118,11 @@ struct LLMModel: Identifiable {}
 - `sessionStore` is provided by `AppShellView` and scoped per model family.
 - Streaming responses use `OpenAIStreamingClient` or `ClaudeStreamingClient`
   from `src/macos/llm/`.
+- For OpenAI sessions, the panel uploads the session PDF to OpenAI Files API
+  before the first prompt, stores the returned `fileID` in the session, and
+  reuses it for later prompts.
+- Deleting an OpenAI session also attempts to delete its uploaded file from
+  OpenAI Files API.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples

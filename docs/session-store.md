@@ -19,6 +19,7 @@ panel.
  * @selectedModel: Selected model within the provider
  * @customModelId: Custom model identifier when using a custom model
  * @openPDFPath: File path of the PDF associated with the session
+ * @fileID: Uploaded provider file id associated with the session document
  */
 struct ChatSession: Identifiable {}
 
@@ -42,6 +43,8 @@ final class SessionStore: ObservableObject {}
 - Session creation starts with empty messages and the current context selection.
 - Each session can store the path of its associated PDF so the app shell can
   reopen documents when switching sessions.
+- Each session can persist a provider file id so uploaded documents can be
+  reused across turns.
 - Deleting a session removes it from the list and reassigns the active session
   to the most recently created remaining session when needed.
 - Session data is written to Application Support as JSON per provider so
