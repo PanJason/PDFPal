@@ -402,19 +402,21 @@ struct ChatPanel: View {
         retryPrompt = prompt
         hasReceivedDelta = false
 
+        let contextCandidate = activeContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        let contextForMessage = includeContextInRequest && !contextCandidate.isEmpty ? activeContext : nil
+
         if appendUserMessage {
-            sessionStore.appendMessage(ChatMessage(role: .user, text: prompt))
+            sessionStore.appendMessage(ChatMessage(role: .user, text: prompt, contextText: contextForMessage))
         }
 
         let streamId = UUID()
         activeStreamId = streamId
         let assistantId = UUID()
 
-        let contextCandidate = activeContext.trimmingCharacters(in: .whitespacesAndNewlines)
         let request = LLMRequest(
             documentId: documentId,
             userPrompt: prompt,
-            context: includeContextInRequest && !contextCandidate.isEmpty ? activeContext : nil
+            context: contextForMessage
         )
         let client = makeClient(for: selectedModel, modelId: modelId)
 
@@ -694,11 +696,13 @@ struct ChatMessage: Identifiable, Codable {
     let id: UUID
     let role: ChatRole
     var text: String
+    var contextText: String?
 
-    init(id: UUID = UUID(), role: ChatRole, text: String) {
+    init(id: UUID = UUID(), role: ChatRole, text: String, contextText: String? = nil) {
         self.id = id
         self.role = role
         self.text = text
+        self.contextText = contextText
     }
 }
 
@@ -713,6 +717,8 @@ private enum ChatScrollAnchor {
 
 struct ChatMessageRow: View {
     let message: ChatMessage
+    @State private var isContextExpanded = false
+    @State private var measuredBubbleWidth: CGFloat = 0
 
     var body: some View {
         HStack {
@@ -727,12 +733,28 @@ struct ChatMessageRow: View {
     }
 
     private var bubble: some View {
-        Text(message.text)
-            .font(.body)
+        VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
+            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
+                Text(message.text)
+                    .font(.body)
+                    .multilineTextAlignment(message.role == .user ? .trailing : .leading)
+
+                contextToggleButton
+            }
             .padding(12)
             .background(bubbleColor)
             .cornerRadius(12)
             .frame(maxWidth: 360, alignment: message.role == .user ? .trailing : .leading)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: BubbleWidthKey.self, value: proxy.size.width)
+                }
+            )
+            .onPreferenceChange(BubbleWidthKey.self) { width in
+                guard message.role == .user else { return }
+                measuredBubbleWidth = width
+            }
             .overlay(
                 Group {
                     if message.role == .assistant {
@@ -741,12 +763,62 @@ struct ChatMessageRow: View {
                     }
                 }
             )
+
+            if isContextExpanded, let contextText = message.contextText, !contextText.isEmpty {
+                Text(contextText)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(10)
+                    .frame(width: bubbleWidth, alignment: .leading)
+                    .background(Color.secondary.opacity(0.08))
+                    .cornerRadius(10)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
     }
 
     private var bubbleColor: Color {
         message.role == .user
             ? Color.accentColor.opacity(0.18)
             : Color.secondary.opacity(0.12)
+    }
+
+    private var bubbleWidth: CGFloat? {
+        guard message.role == .user, measuredBubbleWidth > 0 else { return nil }
+        return measuredBubbleWidth
+    }
+
+    private var contextToggleButton: some View {
+        Group {
+            if message.role == .user,
+               let contextText = message.contextText,
+               !contextText.isEmpty {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isContextExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Context")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Image(systemName: "text.quote")
+                            .imageScale(.small)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isContextExpanded ? "Hide context" : "Show context")
+            }
+        }
+    }
+}
+
+private struct BubbleWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
