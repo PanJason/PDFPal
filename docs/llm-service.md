@@ -11,9 +11,8 @@ emits incremental text deltas for the chat UI to render in real time.
 /**
  * LLMRequest - Single-turn LLM request payload
  * @documentId: Identifier for the active document session
- * @selectionText: Text selection captured from the PDF viewer
  * @userPrompt: User prompt entered in the chat panel
- * @context: Optional extra context string
+ * @context: Optional context string from the session
  */
 struct LLMRequest {}
 
@@ -141,9 +140,8 @@ inside the call scope.
 let client = OpenAIStreamingClient()
 let request = LLMRequest(
     documentId: "paper-123",
-    selectionText: selection,
     userPrompt: "Summarize the main contribution.",
-    context: nil
+    context: contextText
 )
 
 Task {
