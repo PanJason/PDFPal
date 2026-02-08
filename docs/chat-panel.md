@@ -92,6 +92,7 @@ struct LLMModel: Identifiable {}
 - Model selection state drives the OpenAI or Claude streaming client configuration.
 - The session sidebar visibility is toggled from a hover-only fold control.
 - The session sidebar allows deleting sessions from the current model family.
+- The new-session control is disabled until the provider API key is available.
 
 ## Integration Points
 - `selectionText` is provided by `AppShellView` when the PDF viewer triggers
