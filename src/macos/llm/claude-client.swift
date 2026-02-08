@@ -12,6 +12,7 @@ struct ClaudeClientConfiguration {
     static let defaultEndpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     static let defaultModel = "claude-sonnet-4-5-20250929"
     static let defaultVersion = "2023-06-01"
+    static let filesBetaHeader = "files-api-2025-04-14"
     static let defaultMaxTokens = 1024
 
     static func load() -> ClaudeClientConfiguration {
@@ -203,12 +204,13 @@ struct ClaudeStreamingClient: LLMClient {
         }
 
         let system = buildSystemPrompt(for: request)
+        let messageContent = buildMessageContent(for: request)
         let payload = ClaudeRequestBody(
             model: configuration.model,
             maxTokens: configuration.maxTokens,
             system: system,
             messages: [
-                ClaudeMessage(role: "user", content: request.userPrompt)
+                ClaudeMessage(role: "user", content: messageContent)
             ],
             stream: stream
         )
@@ -223,6 +225,9 @@ struct ClaudeStreamingClient: LLMClient {
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         urlRequest.setValue(configuration.apiVersion, forHTTPHeaderField: "anthropic-version")
+        if request.fileID?.isEmpty == false {
+            urlRequest.setValue(ClaudeClientConfiguration.filesBetaHeader, forHTTPHeaderField: "anthropic-beta")
+        }
         if stream {
             urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         }
@@ -244,6 +249,19 @@ struct ClaudeStreamingClient: LLMClient {
 
         \(sections.joined(separator: "\n\n"))
         """
+    }
+
+    private func buildMessageContent(for request: LLMRequest) -> [ClaudeContent] {
+        var content: [ClaudeContent] = [
+            .text(request.userPrompt)
+        ]
+
+        if let fileID = request.fileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !fileID.isEmpty {
+            content.append(.document(fileID: fileID))
+        }
+
+        return content
     }
 
     private func readAllBytes(from bytes: URLSession.AsyncBytes) async throws -> Data {
@@ -292,7 +310,42 @@ private struct ClaudeRequestBody: Encodable {
 
 private struct ClaudeMessage: Encodable {
     let role: String
-    let content: String
+    let content: [ClaudeContent]
+}
+
+private struct ClaudeContent: Encodable {
+    let type: String
+    let text: String?
+    let source: ClaudeDocumentSource?
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case source
+    }
+
+    static func text(_ value: String) -> ClaudeContent {
+        ClaudeContent(type: "text", text: value, source: nil)
+    }
+
+    static func document(fileID: String) -> ClaudeContent {
+        ClaudeContent(type: "document", text: nil, source: ClaudeDocumentSource(fileID: fileID))
+    }
+}
+
+private struct ClaudeDocumentSource: Encodable {
+    let type: String
+    let fileID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case fileID = "file_id"
+    }
+
+    init(fileID: String) {
+        self.type = "file"
+        self.fileID = fileID
+    }
 }
 
 private struct ClaudeErrorEnvelope: Decodable {
@@ -312,4 +365,155 @@ private struct ClaudeStreamEventEnvelope: Decodable {
 private struct ClaudeDelta: Decodable {
     let type: String?
     let text: String?
+}
+
+struct ClaudeFileClient {
+    let configuration: ClaudeClientConfiguration
+    let apiKeyProvider: any APIKeyProvider
+    let session: URLSession
+
+    init(
+        configuration: ClaudeClientConfiguration = .load(),
+        apiKeyProvider: (any APIKeyProvider)? = nil,
+        session: URLSession = .shared
+    ) {
+        self.configuration = configuration
+        let defaultProvider = CompositeAPIKeyProvider(providers: [
+            KeychainAPIKeyProvider(
+                service: configuration.keychainService,
+                account: configuration.keychainAccount
+            ),
+            EnvironmentAPIKeyProvider(environmentKey: "ANTHROPIC_API_KEY")
+        ])
+        self.apiKeyProvider = apiKeyProvider ?? defaultProvider
+        self.session = session
+    }
+
+    func uploadFile(atPath path: String) async throws -> String {
+        let fileURL = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw LLMClientError.invalidRequest("PDF file not found at \(path).")
+        }
+
+        let fileData = try Data(contentsOf: fileURL)
+        let apiKey = try apiKeyProvider.loadAPIKey()
+        let endpoint = try filesEndpoint()
+        let boundary = "Boundary-\(UUID().uuidString)"
+        let body = makeMultipartBody(fileData: fileData, fileName: fileURL.lastPathComponent, boundary: boundary)
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = configuration.timeout
+        request.httpBody = body
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue(configuration.apiVersion, forHTTPHeaderField: "anthropic-version")
+        request.setValue(ClaudeClientConfiguration.filesBetaHeader, forHTTPHeaderField: "anthropic-beta")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMClientError.remoteError("Missing HTTP response.")
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = parseErrorMessage(from: data)
+            throw LLMClientError.httpStatus(httpResponse.statusCode, message)
+        }
+
+        let parsed = try JSONDecoder().decode(ClaudeFileUploadResponse.self, from: data)
+        return parsed.id
+    }
+
+    func deleteFile(fileID: String) async throws {
+        let trimmed = fileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let apiKey = try apiKeyProvider.loadAPIKey()
+        let endpoint = try filesEndpoint().appendingPathComponent(trimmed)
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = configuration.timeout
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue(configuration.apiVersion, forHTTPHeaderField: "anthropic-version")
+        request.setValue(ClaudeClientConfiguration.filesBetaHeader, forHTTPHeaderField: "anthropic-beta")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMClientError.remoteError("Missing HTTP response.")
+        }
+
+        if httpResponse.statusCode == 404 {
+            return
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = parseErrorMessage(from: data)
+            throw LLMClientError.httpStatus(httpResponse.statusCode, message)
+        }
+    }
+
+    private func filesEndpoint() throws -> URL {
+        guard var components = URLComponents(url: configuration.endpoint, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme,
+              scheme.hasPrefix("http"),
+              components.host != nil else {
+            throw LLMClientError.invalidEndpoint(configuration.endpoint.absoluteString)
+        }
+        components.query = nil
+        components.fragment = nil
+        components.path = "/v1/files"
+        guard let url = components.url else {
+            throw LLMClientError.invalidEndpoint(configuration.endpoint.absoluteString)
+        }
+        return url
+    }
+
+    private func makeMultipartBody(fileData: Data, fileName: String, boundary: String) -> Data {
+        var body = Data()
+
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/pdf\r\n\r\n".data(using: .utf8)!)
+        body.append(fileData)
+        body.append("\r\n".data(using: .utf8)!)
+
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        return body
+    }
+
+    private func parseErrorMessage(from data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        if let parsed = try? JSONDecoder().decode(ClaudeErrorEnvelope.self, from: data) {
+            return parsed.error.message
+        }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+extension ClaudeFileClient: LLMFileAttachmentClient {
+    func ensureFileID(existingFileID: String?, filePath: String?) async throws -> String? {
+        if let existingFileID = existingFileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !existingFileID.isEmpty {
+            return existingFileID
+        }
+
+        guard let filePath = filePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !filePath.isEmpty else {
+            return nil
+        }
+
+        return try await uploadFile(atPath: filePath)
+    }
+
+    func deleteFileIfNeeded(fileID: String?) async throws {
+        guard let fileID = fileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !fileID.isEmpty else {
+            return
+        }
+        try await deleteFile(fileID: fileID)
+    }
+}
+
+private struct ClaudeFileUploadResponse: Decodable {
+    let id: String
 }

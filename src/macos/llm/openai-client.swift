@@ -483,7 +483,9 @@ func makeFileAttachmentClient(for model: LLMModel) -> any LLMFileAttachmentClien
     switch model.provider {
     case .openAI:
         return OpenAIFileClient(configuration: .load())
-    case .claude, .gemini:
+    case .claude:
+        return ClaudeFileClient(configuration: .load())
+    case .gemini:
         return NoopFileAttachmentClient()
     }
 }
