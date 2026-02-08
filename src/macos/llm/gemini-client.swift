@@ -8,7 +8,7 @@ struct GeminiClientConfiguration {
     var keychainService: String
     var keychainAccount: String
 
-    static let defaultEndpoint = URL(string: "https://generativelanguage.googleapis.com/v1/models")!
+    static let defaultEndpoint = URL(string: "https://generativelanguage.googleapis.com/v1beta/models")!
     static let defaultModel = "gemini-2.5-pro"
     static let defaultMaxTokens = 1024
 
@@ -201,7 +201,7 @@ struct GeminiStreamingClient: LLMClient {
             : nil
         let payload = GeminiRequestBody(
             contents: [
-                GeminiContent(role: "user", parts: [GeminiPart(text: prompt)])
+                GeminiContent(role: "user", parts: buildParts(prompt: prompt, fileURI: request.fileID))
             ],
             generationConfig: generationConfig
         )
@@ -240,6 +240,19 @@ struct GeminiStreamingClient: LLMClient {
         User question:
         \(request.userPrompt)
         """
+    }
+
+    private func buildParts(prompt: String, fileURI: String?) -> [GeminiPart] {
+        var parts: [GeminiPart] = [
+            .text(prompt)
+        ]
+
+        if let fileURI = fileURI?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !fileURI.isEmpty {
+            parts.append(.fileData(mimeType: "application/pdf", fileURI: fileURI))
+        }
+
+        return parts
     }
 
     private func readAllBytes(from bytes: URLSession.AsyncBytes) async throws -> Data {
@@ -281,7 +294,34 @@ private struct GeminiContent: Encodable {
 }
 
 private struct GeminiPart: Encodable {
-    let text: String
+    let text: String?
+    let fileData: GeminiFileDataPart?
+
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case fileData = "file_data"
+    }
+
+    static func text(_ text: String) -> GeminiPart {
+        GeminiPart(text: text, fileData: nil)
+    }
+
+    static func fileData(mimeType: String, fileURI: String) -> GeminiPart {
+        GeminiPart(
+            text: nil,
+            fileData: GeminiFileDataPart(mimeType: mimeType, fileURI: fileURI)
+        )
+    }
+}
+
+private struct GeminiFileDataPart: Encodable {
+    let mimeType: String
+    let fileURI: String
+
+    private enum CodingKeys: String, CodingKey {
+        case mimeType = "mime_type"
+        case fileURI = "file_uri"
+    }
 }
 
 private struct GeminiGenerationConfig: Encodable {
@@ -311,4 +351,302 @@ private struct GeminiErrorResponse: Decodable {
 
 private struct GeminiErrorDetail: Decodable {
     let message: String?
+}
+
+struct GeminiFileClient {
+    let configuration: GeminiClientConfiguration
+    let apiKeyProvider: any APIKeyProvider
+    let session: URLSession
+    let pollIntervalNanoseconds: UInt64
+    let maxPollAttempts: Int
+
+    init(
+        configuration: GeminiClientConfiguration = .load(),
+        apiKeyProvider: (any APIKeyProvider)? = nil,
+        session: URLSession = .shared,
+        pollIntervalNanoseconds: UInt64 = 2_000_000_000,
+        maxPollAttempts: Int = 60
+    ) {
+        self.configuration = configuration
+        let defaultProvider = CompositeAPIKeyProvider(providers: [
+            KeychainAPIKeyProvider(
+                service: configuration.keychainService,
+                account: configuration.keychainAccount
+            ),
+            EnvironmentAPIKeyProvider(environmentKey: "GEMINI_API_KEY")
+        ])
+        self.apiKeyProvider = apiKeyProvider ?? defaultProvider
+        self.session = session
+        self.pollIntervalNanoseconds = pollIntervalNanoseconds
+        self.maxPollAttempts = maxPollAttempts
+    }
+
+    func uploadFile(atPath path: String) async throws -> String {
+        let fileURL = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw LLMClientError.invalidRequest("PDF file not found at \(path).")
+        }
+
+        let apiKey = try apiKeyProvider.loadAPIKey()
+        let fileData = try Data(contentsOf: fileURL)
+        let uploadURL = try await startResumableUpload(
+            apiKey: apiKey,
+            fileName: fileURL.lastPathComponent,
+            fileSizeBytes: fileData.count
+        )
+
+        let uploadedFile = try await finalizeUpload(
+            uploadURL: uploadURL,
+            fileData: fileData
+        )
+
+        let name = uploadedFile.name ?? resourceName(fromURI: uploadedFile.uri)
+        guard let resourceName = name else {
+            throw LLMClientError.decoding("Gemini upload missing resource name.")
+        }
+        let uri = try await waitUntilActive(apiKey: apiKey, resourceName: resourceName)
+        return uri
+    }
+
+    func deleteFile(fileURI: String) async throws {
+        let apiKey = try apiKeyProvider.loadAPIKey()
+        guard let resourceName = resourceName(fromURI: fileURI) else {
+            throw LLMClientError.invalidRequest("Invalid Gemini file URI.")
+        }
+
+        let endpoint = try filesEndpoint(for: resourceName, apiKey: apiKey)
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = configuration.timeout
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMClientError.remoteError("Missing HTTP response.")
+        }
+
+        if httpResponse.statusCode == 404 {
+            return
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = parseErrorMessage(from: data)
+            throw LLMClientError.httpStatus(httpResponse.statusCode, message)
+        }
+    }
+
+    private func startResumableUpload(
+        apiKey: String,
+        fileName: String,
+        fileSizeBytes: Int
+    ) async throws -> URL {
+        let endpoint = try uploadStartEndpoint(apiKey: apiKey)
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = configuration.timeout
+        request.httpBody = try JSONEncoder().encode(
+            GeminiUploadStartRequest(file: GeminiUploadFileMeta(displayName: fileName))
+        )
+        request.setValue("resumable", forHTTPHeaderField: "X-Goog-Upload-Protocol")
+        request.setValue("start", forHTTPHeaderField: "X-Goog-Upload-Command")
+        request.setValue(String(fileSizeBytes), forHTTPHeaderField: "X-Goog-Upload-Header-Content-Length")
+        request.setValue("application/pdf", forHTTPHeaderField: "X-Goog-Upload-Header-Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let (_, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMClientError.remoteError("Missing HTTP response.")
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw LLMClientError.httpStatus(httpResponse.statusCode, nil)
+        }
+
+        guard let uploadURL = headerValue("x-goog-upload-url", from: httpResponse),
+              let parsed = URL(string: uploadURL) else {
+            throw LLMClientError.decoding("Gemini upload URL missing in response headers.")
+        }
+        return parsed
+    }
+
+    private func finalizeUpload(uploadURL: URL, fileData: Data) async throws -> GeminiFileMeta {
+        var request = URLRequest(url: uploadURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = configuration.timeout
+        request.httpBody = fileData
+        request.setValue(String(fileData.count), forHTTPHeaderField: "Content-Length")
+        request.setValue("0", forHTTPHeaderField: "X-Goog-Upload-Offset")
+        request.setValue("upload, finalize", forHTTPHeaderField: "X-Goog-Upload-Command")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMClientError.remoteError("Missing HTTP response.")
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = parseErrorMessage(from: data)
+            throw LLMClientError.httpStatus(httpResponse.statusCode, message)
+        }
+
+        let payload = try JSONDecoder().decode(GeminiUploadResponse.self, from: data)
+        if let file = payload.file {
+            return file
+        }
+        return GeminiFileMeta(name: payload.name, uri: payload.uri, state: payload.state)
+    }
+
+    private func waitUntilActive(apiKey: String, resourceName: String) async throws -> String {
+        let endpoint = try filesEndpoint(for: resourceName, apiKey: apiKey)
+
+        for _ in 0..<maxPollAttempts {
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "GET"
+            request.timeoutInterval = configuration.timeout
+
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw LLMClientError.remoteError("Missing HTTP response.")
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                let message = parseErrorMessage(from: data)
+                throw LLMClientError.httpStatus(httpResponse.statusCode, message)
+            }
+
+            let payload = try JSONDecoder().decode(GeminiFileStatusResponse.self, from: data)
+            let file = payload.file ?? GeminiFileMeta(name: payload.name, uri: payload.uri, state: payload.state)
+            let state = normalizeState(file.state)
+
+            if state == "ACTIVE" {
+                guard let uri = file.uri, !uri.isEmpty else {
+                    throw LLMClientError.decoding("Gemini file is ACTIVE but missing URI.")
+                }
+                return uri
+            }
+
+            if state == "FAILED" || state == "ERROR" || state == "CANCELLED" {
+                throw LLMClientError.remoteError("Gemini file processing failed (\(state)).")
+            }
+
+            try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+
+        throw LLMClientError.remoteError("Timed out waiting for Gemini file processing.")
+    }
+
+    private func normalizeState(_ state: String?) -> String {
+        guard let state else { return "" }
+        if let last = state.split(separator: ".").last {
+            return String(last).uppercased()
+        }
+        return state.uppercased()
+    }
+
+    private func uploadStartEndpoint(apiKey: String) throws -> URL {
+        guard var components = URLComponents(url: configuration.endpoint, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme,
+              scheme.hasPrefix("http"),
+              components.host != nil else {
+            throw LLMClientError.invalidEndpoint(configuration.endpoint.absoluteString)
+        }
+        components.path = "/upload/v1beta/files"
+        components.queryItems = [URLQueryItem(name: "key", value: apiKey)]
+        guard let url = components.url else {
+            throw LLMClientError.invalidEndpoint(configuration.endpoint.absoluteString)
+        }
+        return url
+    }
+
+    private func filesEndpoint(for resourceName: String, apiKey: String) throws -> URL {
+        guard var components = URLComponents(url: configuration.endpoint, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme,
+              scheme.hasPrefix("http"),
+              components.host != nil else {
+            throw LLMClientError.invalidEndpoint(configuration.endpoint.absoluteString)
+        }
+        let normalized = resourceName.hasPrefix("files/") ? resourceName : "files/\(resourceName)"
+        components.path = "/v1beta/\(normalized)"
+        components.queryItems = [URLQueryItem(name: "key", value: apiKey)]
+        guard let url = components.url else {
+            throw LLMClientError.invalidEndpoint(configuration.endpoint.absoluteString)
+        }
+        return url
+    }
+
+    private func headerValue(_ header: String, from response: HTTPURLResponse) -> String? {
+        for (key, value) in response.allHeaderFields {
+            guard let keyString = key as? String else { continue }
+            if keyString.caseInsensitiveCompare(header) == .orderedSame {
+                return value as? String
+            }
+        }
+        return nil
+    }
+
+    private func parseErrorMessage(from data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        if let parsed = try? JSONDecoder().decode(GeminiErrorResponse.self, from: data) {
+            return parsed.error?.message
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func resourceName(fromURI uri: String?) -> String? {
+        guard let uri, let parsed = URL(string: uri) else { return nil }
+        let path = parsed.path
+        guard let range = path.range(of: "/files/") else { return nil }
+        let suffix = path[range.upperBound...]
+        guard !suffix.isEmpty else { return nil }
+        return "files/\(suffix)"
+    }
+}
+
+extension GeminiFileClient: LLMFileAttachmentClient {
+    func ensureFileID(existingFileID: String?, filePath: String?) async throws -> String? {
+        if let existingFileID = existingFileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !existingFileID.isEmpty {
+            return existingFileID
+        }
+        guard let filePath = filePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !filePath.isEmpty else {
+            return nil
+        }
+        return try await uploadFile(atPath: filePath)
+    }
+
+    func deleteFileIfNeeded(fileID: String?) async throws {
+        guard let fileID = fileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !fileID.isEmpty else {
+            return
+        }
+        try await deleteFile(fileURI: fileID)
+    }
+}
+
+private struct GeminiUploadStartRequest: Encodable {
+    let file: GeminiUploadFileMeta
+}
+
+private struct GeminiUploadFileMeta: Encodable {
+    let displayName: String
+
+    private enum CodingKeys: String, CodingKey {
+        case displayName = "display_name"
+    }
+}
+
+private struct GeminiUploadResponse: Decodable {
+    let file: GeminiFileMeta?
+    let name: String?
+    let uri: String?
+    let state: String?
+}
+
+private struct GeminiFileStatusResponse: Decodable {
+    let file: GeminiFileMeta?
+    let name: String?
+    let uri: String?
+    let state: String?
+}
+
+private struct GeminiFileMeta: Decodable {
+    let name: String?
+    let uri: String?
+    let state: String?
 }
