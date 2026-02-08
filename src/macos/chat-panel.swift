@@ -273,7 +273,8 @@ struct ChatPanel: View {
                 sessionStore.selectSession(sessionId)
             },
             onNewSession: createNewSession,
-            onDeleteSession: deleteSession
+            onDeleteSession: deleteSession,
+            canCreateSession: isAPIKeyAvailable
         )
         .frame(width: 220)
     }
@@ -436,6 +437,7 @@ struct ChatPanel: View {
     }
 
     private func createNewSession() {
+        guard isAPIKeyAvailable else { return }
         cancelStream()
         let context = selectionText.isEmpty ? activeContext : selectionText
         sessionStore.createSession(
@@ -573,7 +575,10 @@ struct ChatPanel: View {
 
     private func loadSessionState() {
         resetTransientState()
-        guard let session = sessionStore.activeSession else { return }
+        guard let session = sessionStore.activeSession else {
+            updateKeyAvailability(for: selectedModel)
+            return
+        }
         selectedModel = session.selectedModel
         customModelId = session.customModelId
         keyPromptModel = session.selectedModel
@@ -745,6 +750,7 @@ struct SessionSidebar: View {
     let onSelect: (UUID) -> Void
     let onNewSession: () -> Void
     let onDeleteSession: (UUID) -> Void
+    let canCreateSession: Bool
 
     @State private var hoveringSessionId: UUID? = nil
 
@@ -760,6 +766,9 @@ struct SessionSidebar: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
+                .disabled(!canCreateSession)
+                .foregroundColor(canCreateSession ? .primary : .secondary)
+                .opacity(canCreateSession ? 1 : 0.5)
             }
             Divider()
             ScrollView {
