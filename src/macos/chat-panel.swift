@@ -782,6 +782,7 @@ struct SessionSidebar: View {
     @State private var hoveringSessionId: UUID? = nil
     @State private var renamingSessionId: UUID? = nil
     @State private var renameDraft = ""
+    @State private var expandedPathSessionIds: Set<UUID> = []
 
     var body: some View {
         VStack(spacing: 12) {
@@ -829,6 +830,34 @@ struct SessionSidebar: View {
                                                 .buttonStyle(.plain)
                                                 .foregroundColor(.secondary)
                                                 .accessibilityLabel("Open containing folder")
+                                            }
+                                            Button {
+                                                togglePathExpansion(for: session.id)
+                                            } label: {
+                                                Image(systemName: "triangle")
+                                                    .rotationEffect(.degrees(180))
+                                            }
+                                            .buttonStyle(.plain)
+                                            .foregroundColor(.secondary)
+                                            .accessibilityLabel(expandedPathSessionIds.contains(session.id) ? "Hide full path" : "Show full path")
+                                        }
+                                        if expandedPathSessionIds.contains(session.id),
+                                           let fullPath = sessionFullPath(session) {
+                                            HStack(spacing: 6) {
+                                                Text(fullPath)
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                                    .lineLimit(2)
+                                                    .truncationMode(.middle)
+                                                Button {
+                                                    NSPasteboard.general.clearContents()
+                                                    NSPasteboard.general.setString(fullPath, forType: .string)
+                                                } label: {
+                                                    Image(systemName: "doc.on.doc")
+                                                }
+                                                .buttonStyle(.plain)
+                                                .foregroundColor(.secondary)
+                                                .accessibilityLabel("Copy full path")
                                             }
                                         }
                                     }
@@ -894,6 +923,10 @@ struct SessionSidebar: View {
         return URL(fileURLWithPath: path).deletingLastPathComponent()
     }
 
+    private func sessionFullPath(_ session: ChatSession) -> String? {
+        session.openPDFPath
+    }
+
     private func startRename(for session: ChatSession) {
         renamingSessionId = session.id
         renameDraft = session.title
@@ -907,6 +940,14 @@ struct SessionSidebar: View {
             onRenameSession(session.id, trimmed)
         }
         renamingSessionId = nil
+    }
+
+    private func togglePathExpansion(for sessionId: UUID) {
+        if expandedPathSessionIds.contains(sessionId) {
+            expandedPathSessionIds.remove(sessionId)
+        } else {
+            expandedPathSessionIds.insert(sessionId)
+        }
     }
 }
 
