@@ -50,6 +50,7 @@ struct AppShellView: View {
     @State private var selectedProvider: LLMProvider = .openAI
     @StateObject private var openAISessionStore = SessionStore(provider: .openAI)
     @StateObject private var claudeSessionStore = SessionStore(provider: .claude)
+    @StateObject private var geminiSessionStore = SessionStore(provider: .gemini)
 
     var body: some View {
         HSplitView {
@@ -90,16 +91,21 @@ struct AppShellView: View {
         .onReceive(claudeSessionStore.$activeSessionId) { _ in
             syncFileURLForActiveSession(in: claudeSessionStore)
         }
+        .onReceive(geminiSessionStore.$activeSessionId) { _ in
+            syncFileURLForActiveSession(in: geminiSessionStore)
+        }
         .onChange(of: selectedProvider) { _ in
             syncFileURLForActiveSession(in: activeSessionStore)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             openAISessionStore.persistNow()
             claudeSessionStore.persistNow()
+            geminiSessionStore.persistNow()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             openAISessionStore.persistNow()
             claudeSessionStore.persistNow()
+            geminiSessionStore.persistNow()
         }
         .alert("Could not open PDF", isPresented: $isShowingOpenError) {
             Button("OK", role: .cancel) {}
@@ -153,6 +159,8 @@ struct AppShellView: View {
             return openAISessionStore
         case .claude:
             return claudeSessionStore
+        case .gemini:
+            return geminiSessionStore
         }
     }
 
@@ -218,6 +226,12 @@ struct AppShellView: View {
                 KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
                 EnvironmentAPIKeyProvider(environmentKey: provider.environmentKey)
             ])
+        case .gemini:
+            let config = GeminiClientConfiguration.load()
+            return CompositeAPIKeyProvider(providers: [
+                KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
+                EnvironmentAPIKeyProvider(environmentKey: provider.environmentKey)
+            ])
         }
     }
 
@@ -238,6 +252,14 @@ struct AppShellView: View {
                 selectionText: selectionText,
                 openPDFPath: fileURL?.path,
                 sessionStore: claudeSessionStore,
+                onClose: { isChatVisible = false }
+            )
+        case .gemini:
+            GeminiLLMChatServing(
+                documentId: documentId,
+                selectionText: selectionText,
+                openPDFPath: fileURL?.path,
+                sessionStore: geminiSessionStore,
                 onClose: { isChatVisible = false }
             )
         }
@@ -263,6 +285,24 @@ struct OpenAILLMChatServing: View {
 }
 
 struct ClaudeLLMChatServing: View {
+    let documentId: String
+    let selectionText: String
+    let openPDFPath: String?
+    let sessionStore: SessionStore
+    let onClose: () -> Void
+
+    var body: some View {
+        ChatPanel(
+            documentId: documentId,
+            selectionText: selectionText,
+            openPDFPath: openPDFPath,
+            sessionStore: sessionStore,
+            onClose: onClose
+        )
+    }
+}
+
+struct GeminiLLMChatServing: View {
     let documentId: String
     let selectionText: String
     let openPDFPath: String?

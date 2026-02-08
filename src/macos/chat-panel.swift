@@ -473,6 +473,17 @@ struct ChatPanel: View {
                 keychainAccount: base.keychainAccount
             )
             return ClaudeStreamingClient(configuration: config)
+        case .gemini:
+            let base = GeminiClientConfiguration.load()
+            let config = GeminiClientConfiguration(
+                endpoint: base.endpoint,
+                model: modelId,
+                timeout: base.timeout,
+                maxTokens: base.maxTokens,
+                keychainService: base.keychainService,
+                keychainAccount: base.keychainAccount
+            )
+            return GeminiStreamingClient(configuration: config)
         }
     }
 
@@ -532,6 +543,12 @@ struct ChatPanel: View {
                 KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
                 EnvironmentAPIKeyProvider(environmentKey: model.provider.environmentKey)
             ])
+        case .gemini:
+            let config = GeminiClientConfiguration.load()
+            return CompositeAPIKeyProvider(providers: [
+                KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
+                EnvironmentAPIKeyProvider(environmentKey: model.provider.environmentKey)
+            ])
         }
     }
 
@@ -542,6 +559,9 @@ struct ChatPanel: View {
             return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
         case .claude:
             let config = ClaudeClientConfiguration.load()
+            return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
+        case .gemini:
+            let config = GeminiClientConfiguration.load()
             return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
         }
     }
@@ -825,6 +845,7 @@ struct SessionSidebar: View {
 enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
     case openAI
     case claude
+    case gemini
 
     var id: String { rawValue }
 
@@ -834,6 +855,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
             return "OpenAI"
         case .claude:
             return "Claude"
+        case .gemini:
+            return "Gemini"
         }
     }
 
@@ -843,6 +866,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
             return "OPENAI_API_KEY"
         case .claude:
             return "ANTHROPIC_API_KEY"
+        case .gemini:
+            return "GEMINI_API_KEY"
         }
     }
 
@@ -852,6 +877,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
             return "OPENAI_API_KEY"
         case .claude:
             return "ANTHROPIC_API_KEY"
+        case .gemini:
+            return "GEMINI_API_KEY"
         }
     }
 }
@@ -873,6 +900,13 @@ struct LLMModel: Identifiable, Hashable, Codable {
         id: "claude-sonnet-4-5-20250929",
         displayName: "Claude Sonnet 4.5",
         provider: .claude,
+        isCustom: false
+    )
+
+    static let defaultGemini = LLMModel(
+        id: "gemini-1.5-flash",
+        displayName: "Gemini 1.5 Flash",
+        provider: .gemini,
         isCustom: false
     )
 
@@ -920,12 +954,30 @@ struct LLMModel: Identifiable, Hashable, Codable {
         )
     ]
 
+    static let geminiModels: [LLMModel] = [
+        defaultGemini,
+        LLMModel(
+            id: "gemini-1.5-pro",
+            displayName: "Gemini 1.5 Pro",
+            provider: .gemini,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "custom-gemini",
+            displayName: "Custom (Gemini)",
+            provider: .gemini,
+            isCustom: true
+        )
+    ]
+
     static func defaultModel(for provider: LLMProvider) -> LLMModel {
         switch provider {
         case .openAI:
             return defaultOpenAI
         case .claude:
             return defaultClaude
+        case .gemini:
+            return defaultGemini
         }
     }
 
@@ -935,6 +987,8 @@ struct LLMModel: Identifiable, Hashable, Codable {
             return openAIModels
         case .claude:
             return claudeModels
+        case .gemini:
+            return geminiModels
         }
     }
 }
