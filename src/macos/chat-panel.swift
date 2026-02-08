@@ -1063,8 +1063,8 @@ struct LLMModel: Identifiable, Hashable, Codable {
     )
 
     static let defaultGemini = LLMModel(
-        id: "gemini-1.5-flash",
-        displayName: "Gemini 1.5 Flash",
+        id: "gemini-2.5-pro",
+        displayName: "Gemini 2.5 Pro",
         provider: .gemini,
         isCustom: false
     )
@@ -1116,8 +1116,32 @@ struct LLMModel: Identifiable, Hashable, Codable {
     static let geminiModels: [LLMModel] = [
         defaultGemini,
         LLMModel(
-            id: "gemini-1.5-pro",
-            displayName: "Gemini 1.5 Pro",
+            id: "gemini-3-pro-preview",
+            displayName: "Gemini 3 Pro",
+            provider: .gemini,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "gemini-3-flash-preview",
+            displayName: "Gemini 3 Flash",
+            provider: .gemini,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "gemini-2.5-pro",
+            displayName: "Gemini 2.5 Pro",
+            provider: .gemini,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "gemini-2.5-flash",
+            displayName: "Gemini 2.5 Flash",
+            provider: .gemini,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "gemini-2.5-flash-lite",
+            displayName: "Gemini 2.5 Flash Lite",
             provider: .gemini,
             isCustom: false
         ),

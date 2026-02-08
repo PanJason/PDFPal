@@ -8,8 +8,8 @@ struct GeminiClientConfiguration {
     var keychainService: String
     var keychainAccount: String
 
-    static let defaultEndpoint = URL(string: "https://generativelanguage.googleapis.com/v1beta/models")!
-    static let defaultModel = "gemini-1.5-flash"
+    static let defaultEndpoint = URL(string: "https://generativelanguage.googleapis.com/v1/models")!
+    static let defaultModel = "gemini-2.5-pro"
     static let defaultMaxTokens = 1024
 
     static func load() -> GeminiClientConfiguration {
