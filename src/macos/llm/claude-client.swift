@@ -232,14 +232,9 @@ struct ClaudeStreamingClient: LLMClient {
     private func buildSystemPrompt(for request: LLMRequest) -> String? {
         var sections: [String] = []
 
-        let selection = request.selectionText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !selection.isEmpty {
-            sections.append("Selected passage:\n\"\"\"\n\(selection)\n\"\"\"")
-        }
-
         if let context = request.context?.trimmingCharacters(in: .whitespacesAndNewlines),
            !context.isEmpty {
-            sections.append("Additional context:\n\"\"\"\n\(context)\n\"\"\"")
+            sections.append("Context:\n\"\"\"\n\(context)\n\"\"\"")
         }
 
         guard !sections.isEmpty else { return nil }

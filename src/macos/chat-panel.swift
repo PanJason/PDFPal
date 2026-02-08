@@ -413,7 +413,6 @@ struct ChatPanel: View {
         let contextCandidate = activeContext.trimmingCharacters(in: .whitespacesAndNewlines)
         let request = LLMRequest(
             documentId: documentId,
-            selectionText: includeContextInRequest ? selectionText : "",
             userPrompt: prompt,
             context: includeContextInRequest && !contextCandidate.isEmpty ? activeContext : nil
         )

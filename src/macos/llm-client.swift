@@ -3,7 +3,6 @@ import Security
 
 struct LLMRequest {
     let documentId: String
-    let selectionText: String
     let userPrompt: String
     let context: String?
 }
@@ -191,7 +190,7 @@ struct MockLLMClient: LLMClient {
             let task = Task {
                 let replyText = """
                 Mock response for: \(request.userPrompt)
-                Selected text length: \(request.selectionText.count)
+                Context length: \(request.context?.count ?? 0)
                 """
 
                 do {
