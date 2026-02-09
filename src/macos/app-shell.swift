@@ -35,6 +35,12 @@ struct LLMPaperReadingHelperApp: App {
             AppShellView()
         }
         .commands {
+            CommandGroup(replacing: .saveItem) {
+                Button("Save") {
+                    NotificationCenter.default.post(name: .pdfSaveDocument, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command])
+            }
             TextEditingCommands()
         }
     }
@@ -49,6 +55,7 @@ struct AppShellView: View {
     @State private var openErrorMessage = ""
     @State private var isShowingOpenError = false
     @State private var selectedProvider: LLMProvider = .openAI
+    @State private var selectedAnnotationAction: PDFAnnotationAction = .highlightYellow
     @StateObject private var openAISessionStore = SessionStore(provider: .openAI)
     @StateObject private var claudeSessionStore = SessionStore(provider: .claude)
     @StateObject private var geminiSessionStore = SessionStore(provider: .gemini)
@@ -77,6 +84,55 @@ struct AppShellView: View {
                     }
                 }
                 .pickerStyle(.menu)
+                Menu {
+                    Toggle(isOn: annotationSelectionBinding(.highlightYellow)) {
+                        HStack {
+                            annotationColorIcon(.systemYellow)
+                            Text("Yellow")
+                        }
+                    }
+                    Toggle(isOn: annotationSelectionBinding(.highlightGreen)) {
+                        HStack {
+                            annotationColorIcon(.systemGreen)
+                            Text("Green")
+                        }
+                    }
+                    Toggle(isOn: annotationSelectionBinding(.highlightBlue)) {
+                        HStack {
+                            annotationColorIcon(.systemBlue)
+                            Text("Blue")
+                        }
+                    }
+                    Toggle(isOn: annotationSelectionBinding(.highlightPink)) {
+                        HStack {
+                            annotationColorIcon(.systemPink)
+                            Text("Pink")
+                        }
+                    }
+                    Toggle(isOn: annotationSelectionBinding(.highlightPurple)) {
+                        HStack {
+                            annotationColorIcon(.systemPurple)
+                            Text("Purple")
+                        }
+                    }
+                    Divider()
+                    Toggle(isOn: annotationSelectionBinding(.underline)) {
+                        HStack {
+                            Image(systemName: "underline")
+                                .foregroundColor(.primary)
+                            Text("Underline")
+                        }
+                    }
+                    Toggle(isOn: annotationSelectionBinding(.strikeOut)) {
+                        HStack {
+                            Image(systemName: "strikethrough")
+                                .foregroundColor(.primary)
+                            Text("Strikethrough")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "highlighter")
+                }
                 Menu {
                     Toggle("Chat Panel", isOn: $isChatVisible)
                     Toggle("Sessions Sidebar", isOn: $isSessionSidebarVisible)
@@ -240,6 +296,48 @@ struct AppShellView: View {
                 EnvironmentAPIKeyProvider(environmentKey: provider.environmentKey)
             ])
         }
+    }
+
+    private func applyPDFAnnotation(_ action: PDFAnnotationAction) {
+        NotificationCenter.default.post(name: .pdfApplyAnnotation, object: action)
+    }
+
+    private func applyAndSelectPDFAnnotation(_ action: PDFAnnotationAction) {
+        selectedAnnotationAction = action
+        applyPDFAnnotation(action)
+    }
+
+    private func annotationSelectionBinding(_ action: PDFAnnotationAction) -> Binding<Bool> {
+        Binding(
+            get: { selectedAnnotationAction == action },
+            set: { _ in
+                applyAndSelectPDFAnnotation(action)
+            }
+        )
+    }
+
+    private func annotationColorIcon(_ color: NSColor) -> Image {
+        Image(nsImage: colorCircleImage(color))
+            .renderingMode(.original)
+    }
+
+    private func colorCircleImage(_ color: NSColor) -> NSImage {
+        let size = NSSize(width: 11, height: 11)
+        let image = NSImage(size: size)
+        image.lockFocus()
+
+        let rect = NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5)
+        color.setFill()
+        let circle = NSBezierPath(ovalIn: rect)
+        circle.fill()
+
+        NSColor.black.withAlphaComponent(0.25).setStroke()
+        circle.lineWidth = 1
+        circle.stroke()
+
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
     }
 
     @ViewBuilder
