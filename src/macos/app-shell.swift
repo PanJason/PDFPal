@@ -56,6 +56,7 @@ struct AppShellView: View {
     @State private var isShowingOpenError = false
     @State private var selectedProvider: LLMProvider = .openAI
     @State private var selectedAnnotationAction: PDFAnnotationAction = .highlightYellow
+    @State private var isHighlighterModeEnabled = false
     @StateObject private var openAISessionStore = SessionStore(provider: .openAI)
     @StateObject private var claudeSessionStore = SessionStore(provider: .claude)
     @StateObject private var geminiSessionStore = SessionStore(provider: .gemini)
@@ -84,54 +85,67 @@ struct AppShellView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                Menu {
-                    Toggle(isOn: annotationSelectionBinding(.highlightYellow)) {
-                        HStack {
-                            annotationColorIcon(.systemYellow)
-                            Text("Yellow")
-                        }
+                HStack(spacing: 0) {
+                    Button(action: handleHighlighterPrimaryAction) {
+                        Image(systemName: "highlighter")
+                            .symbolVariant(isHighlighterModeEnabled ? .fill : .none)
+                            .foregroundColor(isHighlighterModeEnabled ? .accentColor : .primary)
                     }
-                    Toggle(isOn: annotationSelectionBinding(.highlightGreen)) {
-                        HStack {
-                            annotationColorIcon(.systemGreen)
-                            Text("Green")
+                    .help(isHighlighterModeEnabled ? "Highlighter mode enabled" : "Apply selected highlighter style")
+
+                    Menu {
+                        Toggle(isOn: annotationSelectionBinding(.highlightYellow)) {
+                            HStack {
+                                annotationColorIcon(.systemYellow)
+                                Text("Yellow")
+                            }
                         }
-                    }
-                    Toggle(isOn: annotationSelectionBinding(.highlightBlue)) {
-                        HStack {
-                            annotationColorIcon(.systemBlue)
-                            Text("Blue")
+                        Toggle(isOn: annotationSelectionBinding(.highlightGreen)) {
+                            HStack {
+                                annotationColorIcon(.systemGreen)
+                                Text("Green")
+                            }
                         }
-                    }
-                    Toggle(isOn: annotationSelectionBinding(.highlightPink)) {
-                        HStack {
-                            annotationColorIcon(.systemPink)
-                            Text("Pink")
+                        Toggle(isOn: annotationSelectionBinding(.highlightBlue)) {
+                            HStack {
+                                annotationColorIcon(.systemBlue)
+                                Text("Blue")
+                            }
                         }
-                    }
-                    Toggle(isOn: annotationSelectionBinding(.highlightPurple)) {
-                        HStack {
-                            annotationColorIcon(.systemPurple)
-                            Text("Purple")
+                        Toggle(isOn: annotationSelectionBinding(.highlightPink)) {
+                            HStack {
+                                annotationColorIcon(.systemPink)
+                                Text("Pink")
+                            }
                         }
-                    }
-                    Divider()
-                    Toggle(isOn: annotationSelectionBinding(.underline)) {
-                        HStack {
-                            Image(systemName: "underline")
-                                .foregroundColor(.primary)
-                            Text("Underline")
+                        Toggle(isOn: annotationSelectionBinding(.highlightPurple)) {
+                            HStack {
+                                annotationColorIcon(.systemPurple)
+                                Text("Purple")
+                            }
                         }
-                    }
-                    Toggle(isOn: annotationSelectionBinding(.strikeOut)) {
-                        HStack {
-                            Image(systemName: "strikethrough")
-                                .foregroundColor(.primary)
-                            Text("Strikethrough")
+                        Divider()
+                        Toggle(isOn: annotationSelectionBinding(.underline)) {
+                            HStack {
+                                Image(systemName: "underline")
+                                    .foregroundColor(.primary)
+                                Text("Underline")
+                            }
                         }
+                        Toggle(isOn: annotationSelectionBinding(.strikeOut)) {
+                            HStack {
+                                Image(systemName: "strikethrough")
+                                    .foregroundColor(.primary)
+                                Text("Strikethrough")
+                            }
+                        }
+                    } label: {
+                        Text("")
                     }
-                } label: {
-                    Image(systemName: "highlighter")
+                }
+                .padding(.horizontal, 4)
+                .onAppear {
+                    postSelectedAnnotationAction()
                 }
                 Menu {
                     Toggle("Chat Panel", isOn: $isChatVisible)
@@ -169,6 +183,11 @@ struct AppShellView: View {
             openAISessionStore.persistNow()
             claudeSessionStore.persistNow()
             geminiSessionStore.persistNow()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pdfHighlighterModeChanged)) { notification in
+            if let enabled = notification.object as? Bool {
+                isHighlighterModeEnabled = enabled
+            }
         }
         .alert("Could not open PDF", isPresented: $isShowingOpenError) {
             Button("OK", role: .cancel) {}
@@ -298,20 +317,24 @@ struct AppShellView: View {
         }
     }
 
-    private func applyPDFAnnotation(_ action: PDFAnnotationAction) {
-        NotificationCenter.default.post(name: .pdfApplyAnnotation, object: action)
+    private func selectAnnotationAction(_ action: PDFAnnotationAction) {
+        selectedAnnotationAction = action
+        postSelectedAnnotationAction()
     }
 
-    private func applyAndSelectPDFAnnotation(_ action: PDFAnnotationAction) {
-        selectedAnnotationAction = action
-        applyPDFAnnotation(action)
+    private func postSelectedAnnotationAction() {
+        NotificationCenter.default.post(name: .pdfSetAnnotationAction, object: selectedAnnotationAction)
+    }
+
+    private func handleHighlighterPrimaryAction() {
+        NotificationCenter.default.post(name: .pdfHighlighterPrimaryAction, object: selectedAnnotationAction)
     }
 
     private func annotationSelectionBinding(_ action: PDFAnnotationAction) -> Binding<Bool> {
         Binding(
             get: { selectedAnnotationAction == action },
             set: { _ in
-                applyAndSelectPDFAnnotation(action)
+                selectAnnotationAction(action)
             }
         )
     }

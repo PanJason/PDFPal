@@ -13,7 +13,9 @@ enum PDFAnnotationAction: String {
 }
 
 extension Notification.Name {
-    static let pdfApplyAnnotation = Notification.Name("PDFApplyAnnotation")
+    static let pdfSetAnnotationAction = Notification.Name("PDFSetAnnotationAction")
+    static let pdfHighlighterPrimaryAction = Notification.Name("PDFHighlighterPrimaryAction")
+    static let pdfHighlighterModeChanged = Notification.Name("PDFHighlighterModeChanged")
     static let pdfSaveDocument = Notification.Name("PDFSaveDocument")
 }
 
@@ -93,27 +95,47 @@ final class PDFKitView: PDFView {
     private var contextMenuPage: PDFPage?
     private var contextMenuPointOnPage: CGPoint?
     private var annotationObserver: NSObjectProtocol?
+    private var highlighterPrimaryObserver: NSObjectProtocol?
+    private var selectionChangedObserver: NSObjectProtocol?
     private var saveObserver: NSObjectProtocol?
+    private var pendingModeApplyWorkItem: DispatchWorkItem?
+    private var currentAnnotationAction: PDFAnnotationAction = .highlightYellow
+    private var isHighlighterModeEnabled = false
+    private var isApplyingFromMode = false
+    private var lastModeSelectionFingerprint: String?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         registerAnnotationObserver()
+        registerSelectionObserver()
         registerSaveObserver()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         registerAnnotationObserver()
+        registerSelectionObserver()
         registerSaveObserver()
     }
 
     deinit {
+        pendingModeApplyWorkItem?.cancel()
         if let annotationObserver {
             NotificationCenter.default.removeObserver(annotationObserver)
+        }
+        if let highlighterPrimaryObserver {
+            NotificationCenter.default.removeObserver(highlighterPrimaryObserver)
+        }
+        if let selectionChangedObserver {
+            NotificationCenter.default.removeObserver(selectionChangedObserver)
         }
         if let saveObserver {
             NotificationCenter.default.removeObserver(saveObserver)
         }
+    }
+
+    override func setCurrentSelection(_ selection: PDFSelection?, animate: Bool) {
+        super.setCurrentSelection(selection, animate: animate)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -196,12 +218,24 @@ final class PDFKitView: PDFView {
 
     private func registerAnnotationObserver() {
         annotationObserver = NotificationCenter.default.addObserver(
-            forName: .pdfApplyAnnotation,
+            forName: .pdfSetAnnotationAction,
             object: nil,
             queue: .main
         ) { [weak self] note in
             guard let action = note.object as? PDFAnnotationAction else { return }
-            self?.applyAnnotation(action)
+            self?.currentAnnotationAction = action
+        }
+
+        highlighterPrimaryObserver = NotificationCenter.default.addObserver(
+            forName: .pdfHighlighterPrimaryAction,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            if let action = note.object as? PDFAnnotationAction {
+                self.currentAnnotationAction = action
+            }
+            self.handleHighlighterPrimaryAction()
         }
     }
 
@@ -215,15 +249,46 @@ final class PDFKitView: PDFView {
         }
     }
 
+    private func registerSelectionObserver() {
+        selectionChangedObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name.PDFViewSelectionChanged,
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            self?.scheduleHighlighterModeApply()
+        }
+    }
+
+    private func scheduleHighlighterModeApply() {
+        pendingModeApplyWorkItem?.cancel()
+        guard isHighlighterModeEnabled else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.applyHighlighterModeIfNeeded(self.currentSelection)
+        }
+        pendingModeApplyWorkItem = workItem
+        // Wait for selection updates to settle so highlight is applied once.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+    }
+
     private func applyAnnotation(_ action: PDFAnnotationAction) {
-        guard let selection = currentSelection else {
-            NSSound.beep()
+        applyAnnotation(action, selection: currentSelection, beepOnEmpty: true)
+    }
+
+    private func applyAnnotation(_ action: PDFAnnotationAction, selection: PDFSelection?, beepOnEmpty: Bool) {
+        guard let selection else {
+            if beepOnEmpty {
+                NSSound.beep()
+            }
             return
         }
 
         let lineSelections = selection.selectionsByLine()
         if lineSelections.isEmpty {
-            NSSound.beep()
+            if beepOnEmpty {
+                NSSound.beep()
+            }
             return
         }
 
@@ -233,42 +298,120 @@ final class PDFKitView: PDFView {
             if bounds.isNull || bounds.isInfinite || bounds.isEmpty {
                 continue
             }
+            if hasEquivalentAnnotation(on: page, action: action, bounds: bounds) {
+                continue
+            }
             let annotation = makeAnnotation(for: action, bounds: bounds)
             page.addAnnotation(annotation)
         }
     }
 
-    private func makeAnnotation(for action: PDFAnnotationAction, bounds: CGRect) -> PDFAnnotation {
-        let annotationType: PDFAnnotationSubtype
-        let color: NSColor
+    private func handleHighlighterPrimaryAction() {
+        if hasNonEmptySelection(currentSelection) {
+            applyAnnotation(currentAnnotationAction, selection: currentSelection, beepOnEmpty: true)
+            return
+        }
+        toggleHighlighterMode()
+    }
 
-        switch action {
-        case .highlightYellow:
-            annotationType = .highlight
-            color = NSColor.systemYellow.withAlphaComponent(0.35)
-        case .highlightGreen:
-            annotationType = .highlight
-            color = NSColor.systemGreen.withAlphaComponent(0.35)
-        case .highlightBlue:
-            annotationType = .highlight
-            color = NSColor.systemBlue.withAlphaComponent(0.35)
-        case .highlightPink:
-            annotationType = .highlight
-            color = NSColor.systemPink.withAlphaComponent(0.35)
-        case .highlightPurple:
-            annotationType = .highlight
-            color = NSColor.systemPurple.withAlphaComponent(0.35)
-        case .underline:
-            annotationType = .underline
-            color = NSColor.systemYellow
-        case .strikeOut:
-            annotationType = .strikeOut
-            color = NSColor.systemRed
+    private func toggleHighlighterMode() {
+        isHighlighterModeEnabled.toggle()
+        if !isHighlighterModeEnabled {
+            pendingModeApplyWorkItem?.cancel()
+            lastModeSelectionFingerprint = nil
+        }
+        NotificationCenter.default.post(name: .pdfHighlighterModeChanged, object: isHighlighterModeEnabled)
+    }
+
+    private func applyHighlighterModeIfNeeded(_ selection: PDFSelection?) {
+        guard isHighlighterModeEnabled else {
+            lastModeSelectionFingerprint = nil
+            return
+        }
+        guard !isApplyingFromMode else { return }
+        guard let selection, hasNonEmptySelection(selection) else {
+            return
         }
 
-        let annotation = PDFAnnotation(bounds: bounds, forType: annotationType, withProperties: nil)
-        annotation.color = color
+        let fingerprint = selectionFingerprint(selection)
+        guard fingerprint != lastModeSelectionFingerprint else { return }
+        lastModeSelectionFingerprint = fingerprint
+
+        isApplyingFromMode = true
+        applyAnnotation(currentAnnotationAction, selection: selection, beepOnEmpty: false)
+        isApplyingFromMode = false
+    }
+
+    private func hasNonEmptySelection(_ selection: PDFSelection?) -> Bool {
+        let text = selection?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !text.isEmpty
+    }
+
+    private func selectionFingerprint(_ selection: PDFSelection) -> String {
+        let pageParts = selection.selectionsByLine().compactMap { lineSelection -> String? in
+            guard let page = lineSelection.pages.first else { return nil }
+            let bounds = lineSelection.bounds(for: page)
+            return "\(Unmanaged.passUnretained(page).toOpaque())|\(bounds.origin.x)|\(bounds.origin.y)|\(bounds.size.width)|\(bounds.size.height)"
+        }
+        let text = selection.string ?? ""
+        return "\(pageParts.joined(separator: ";"))|\(text)"
+    }
+
+    private func makeAnnotation(for action: PDFAnnotationAction, bounds: CGRect) -> PDFAnnotation {
+        let style = annotationStyle(for: action)
+        let annotation = PDFAnnotation(bounds: bounds, forType: style.type, withProperties: nil)
+        annotation.color = style.color
         return annotation
+    }
+
+    private func annotationStyle(for action: PDFAnnotationAction) -> (type: PDFAnnotationSubtype, color: NSColor) {
+        switch action {
+        case .highlightYellow:
+            return (.highlight, NSColor.systemYellow.withAlphaComponent(0.35))
+        case .highlightGreen:
+            return (.highlight, NSColor.systemGreen.withAlphaComponent(0.35))
+        case .highlightBlue:
+            return (.highlight, NSColor.systemBlue.withAlphaComponent(0.35))
+        case .highlightPink:
+            return (.highlight, NSColor.systemPink.withAlphaComponent(0.35))
+        case .highlightPurple:
+            return (.highlight, NSColor.systemPurple.withAlphaComponent(0.35))
+        case .underline:
+            return (.underline, NSColor.systemYellow)
+        case .strikeOut:
+            return (.strikeOut, NSColor.systemRed)
+        }
+    }
+
+    private func hasEquivalentAnnotation(on page: PDFPage, action: PDFAnnotationAction, bounds: CGRect) -> Bool {
+        let expected = annotationStyle(for: action)
+        return page.annotations.contains { annotation in
+            guard annotationTypeMatches(annotation, subtype: expected.type) else { return false }
+            guard boundsAreClose(annotation.bounds, bounds) else { return false }
+            return colorsAreClose(annotation.color, expected.color)
+        }
+    }
+
+    private func annotationTypeMatches(_ annotation: PDFAnnotation, subtype: PDFAnnotationSubtype) -> Bool {
+        let typeName = (annotation.type ?? "").lowercased()
+        switch subtype {
+        case .highlight:
+            return typeName.contains("highlight")
+        case .underline:
+            return typeName.contains("underline")
+        case .strikeOut:
+            return typeName.contains("strike")
+        default:
+            return typeName == subtype.rawValue.lowercased()
+        }
+    }
+
+    private func boundsAreClose(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        let tolerance: CGFloat = 0.5
+        return abs(lhs.origin.x - rhs.origin.x) <= tolerance
+            && abs(lhs.origin.y - rhs.origin.y) <= tolerance
+            && abs(lhs.size.width - rhs.size.width) <= tolerance
+            && abs(lhs.size.height - rhs.size.height) <= tolerance
     }
 
     private func annotation(at event: NSEvent) -> PDFAnnotation? {
