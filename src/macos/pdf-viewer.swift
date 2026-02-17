@@ -90,6 +90,8 @@ final class PDFKitView: PDFView {
     var onAskLLM: ((String) -> Void)?
     private var lastSelectionText: String = ""
     private var contextMenuAnnotation: PDFAnnotation?
+    private var contextMenuPage: PDFPage?
+    private var contextMenuPointOnPage: CGPoint?
     private var annotationObserver: NSObjectProtocol?
     private var saveObserver: NSObjectProtocol?
 
@@ -128,27 +130,32 @@ final class PDFKitView: PDFView {
             menu.addItem(NSMenuItem.separator())
         }
 
-        let annotateItem = NSMenuItem(title: "Annotate Selection", action: nil, keyEquivalent: "")
-        annotateItem.tag = 9100
-        annotateItem.submenu = makeAnnotateMenu()
-        annotateItem.isEnabled = !selectionText.isEmpty
-        menu.addItem(annotateItem)
-
-        if contextMenuAnnotation != nil {
-            let noteTitle = hasAnnotationNote() ? "Edit Note..." : "Add Note..."
-            let noteItem = NSMenuItem(title: noteTitle, action: #selector(handleEditAnnotationNote), keyEquivalent: "")
-            noteItem.target = self
-            noteItem.tag = 9100
-            menu.addItem(noteItem)
-        }
-
         let askItem = NSMenuItem(title: "Ask LLM", action: #selector(handleAskLLM), keyEquivalent: "")
         askItem.target = self
         askItem.isEnabled = !selectionText.isEmpty
         askItem.tag = 9100
         menu.addItem(askItem)
 
+        retargetRemoveAnnotationItems(in: menu)
         return menu
+    }
+
+    private func retargetRemoveAnnotationItems(in menu: NSMenu) {
+        for item in menu.items {
+            if let submenu = item.submenu {
+                retargetRemoveAnnotationItems(in: submenu)
+            }
+
+            let lowerTitle = item.title.lowercased()
+            let isRemoveAnnotationAction = lowerTitle == "remove annotation"
+                || lowerTitle == "remove highlight"
+                || lowerTitle == "remove underline"
+                || lowerTitle == "remove strikethrough"
+            guard isRemoveAnnotationAction else { continue }
+
+            item.action = #selector(handleRemoveAnnotation)
+            item.target = self
+        }
     }
 
     @objc private func handleAskLLM() {
@@ -161,56 +168,29 @@ final class PDFKitView: PDFView {
         onAskLLM?(selection)
     }
 
-    @objc private func applyYellowHighlight() {
-        applyAnnotation(.highlightYellow)
-    }
+    @objc private func handleRemoveAnnotation() {
+        guard let page = contextMenuPage ?? contextMenuAnnotation?.page ?? currentPage else { return }
+        var removedAny = false
 
-    @objc private func applyGreenHighlight() {
-        applyAnnotation(.highlightGreen)
-    }
+        if let point = contextMenuPointOnPage {
+            let pointHits = removableAnnotations(at: point, on: page)
+            removedAny = removeAnnotationCluster(seedAnnotations: pointHits, on: page)
+        }
 
-    @objc private func applyBlueHighlight() {
-        applyAnnotation(.highlightBlue)
-    }
+        if !removedAny, let selection = currentSelection {
+            let selectionHits = removableAnnotations(intersecting: selection, on: page)
+            removedAny = removeAnnotationCluster(seedAnnotations: selectionHits, on: page)
+        }
 
-    @objc private func applyPinkHighlight() {
-        applyAnnotation(.highlightPink)
-    }
+        if !removedAny, let annotation = contextMenuAnnotation {
+            removedAny = removeAnnotationCluster(seedAnnotations: [annotation], on: page)
+                || removeAnnotation(annotation, from: page)
+        }
 
-    @objc private func applyPurpleHighlight() {
-        applyAnnotation(.highlightPurple)
-    }
-
-    @objc private func applyUnderline() {
-        applyAnnotation(.underline)
-    }
-
-    @objc private func applyStrikeOut() {
-        applyAnnotation(.strikeOut)
-    }
-
-    @objc private func handleEditAnnotationNote() {
-        guard let annotation = contextMenuAnnotation else { return }
-
-        let alert = NSAlert()
-        alert.messageText = "Annotation Note"
-        alert.informativeText = "Add or edit note text for this annotation."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-
-        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 120))
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .bezelBorder
-
-        let textView = NSTextView(frame: scrollView.bounds)
-        textView.isRichText = false
-        textView.string = annotation.contents ?? ""
-        scrollView.documentView = textView
-        alert.accessoryView = scrollView
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            let note = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-            annotation.contents = note.isEmpty ? nil : note
+        if removedAny {
+            contextMenuAnnotation = nil
+        } else {
+            NSSound.beep()
         }
     }
 
@@ -233,39 +213,6 @@ final class PDFKitView: PDFView {
         ) { [weak self] _ in
             self?.saveCurrentDocument()
         }
-    }
-
-    private func makeAnnotateMenu() -> NSMenu {
-        let menu = NSMenu()
-
-        let yellow = NSMenuItem(title: "Highlight Yellow", action: #selector(applyYellowHighlight), keyEquivalent: "")
-        yellow.target = self
-        yellow.tag = 9100
-        menu.addItem(yellow)
-
-        let green = NSMenuItem(title: "Highlight Green", action: #selector(applyGreenHighlight), keyEquivalent: "")
-        green.target = self
-        green.tag = 9100
-        menu.addItem(green)
-
-        let pink = NSMenuItem(title: "Highlight Pink", action: #selector(applyPinkHighlight), keyEquivalent: "")
-        pink.target = self
-        pink.tag = 9100
-        menu.addItem(pink)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let underline = NSMenuItem(title: "Underline", action: #selector(applyUnderline), keyEquivalent: "")
-        underline.target = self
-        underline.tag = 9100
-        menu.addItem(underline)
-
-        let strikeOut = NSMenuItem(title: "Strikethrough", action: #selector(applyStrikeOut), keyEquivalent: "")
-        strikeOut.target = self
-        strikeOut.tag = 9100
-        menu.addItem(strikeOut)
-
-        return menu
     }
 
     private func applyAnnotation(_ action: PDFAnnotationAction) {
@@ -326,14 +273,177 @@ final class PDFKitView: PDFView {
 
     private func annotation(at event: NSEvent) -> PDFAnnotation? {
         let pointInView = convert(event.locationInWindow, from: nil)
-        guard let page = page(for: pointInView, nearest: true) else { return nil }
+        guard let page = page(for: pointInView, nearest: true) else {
+            contextMenuPage = nil
+            contextMenuPointOnPage = nil
+            return nil
+        }
+        contextMenuPage = page
         let pointOnPage = convert(pointInView, to: page)
+        contextMenuPointOnPage = pointOnPage
         return page.annotation(at: pointOnPage)
     }
 
-    private func hasAnnotationNote() -> Bool {
-        guard let text = contextMenuAnnotation?.contents else { return false }
-        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private func removableAnnotations(at point: CGPoint, on page: PDFPage) -> [PDFAnnotation] {
+        page.annotations.reversed().filter { annotation in
+            guard isRemovableMarkup(annotation) else { return false }
+            return annotation.bounds.insetBy(dx: -6.0, dy: -6.0).contains(point)
+        }
+    }
+
+    private func removableAnnotations(intersecting selection: PDFSelection, on page: PDFPage) -> [PDFAnnotation] {
+        var matches: [PDFAnnotation] = []
+        let lineSelections = selection.selectionsByLine().filter { $0.pages.first === page }
+        for annotation in page.annotations {
+            guard isRemovableMarkup(annotation) else { continue }
+            if lineSelections.contains(where: { line in
+                let lineBounds = line.bounds(for: page).insetBy(dx: -2.0, dy: -2.0)
+                return lineBounds.intersects(annotation.bounds)
+            }) {
+                matches.append(annotation)
+            }
+        }
+        return matches
+    }
+
+    private func removeAnnotationCluster(seedAnnotations: [PDFAnnotation], on page: PDFPage) -> Bool {
+        let cluster = connectedRemovableAnnotations(from: seedAnnotations, on: page)
+        guard !cluster.isEmpty else { return false }
+
+        var removedAny = false
+        for annotation in cluster {
+            removedAny = removeAnnotation(annotation, from: page) || removedAny
+        }
+        return removedAny
+    }
+
+    private func connectedRemovableAnnotations(from seeds: [PDFAnnotation], on page: PDFPage) -> [PDFAnnotation] {
+        let removable = page.annotations.filter(isRemovableMarkup)
+        guard !removable.isEmpty else { return [] }
+
+        var result: [PDFAnnotation] = []
+        var visited = Set<ObjectIdentifier>()
+        var queue = seeds.filter(isRemovableMarkup)
+        if queue.isEmpty { return [] }
+
+        while !queue.isEmpty {
+            let current = queue.removeFirst()
+            let currentID = ObjectIdentifier(current)
+            guard visited.insert(currentID).inserted else { continue }
+            result.append(current)
+
+            for candidate in removable {
+                let candidateID = ObjectIdentifier(candidate)
+                if visited.contains(candidateID) {
+                    continue
+                }
+                if isSameMarkupGroup(candidate, as: current)
+                    && areAnnotationsConnected(current, candidate) {
+                    queue.append(candidate)
+                }
+            }
+        }
+
+        return result
+    }
+
+    private func isRemovableMarkup(_ annotation: PDFAnnotation) -> Bool {
+        let typeName = (annotation.type ?? "").lowercased()
+        return typeName.contains("highlight")
+            || typeName.contains("underline")
+            || typeName.contains("strike")
+    }
+
+    private func isSameMarkupGroup(_ lhs: PDFAnnotation, as rhs: PDFAnnotation) -> Bool {
+        let lhsType = (lhs.type ?? "").lowercased()
+        let rhsType = (rhs.type ?? "").lowercased()
+        guard lhsType == rhsType else { return false }
+        return colorsAreClose(lhs.color, rhs.color)
+    }
+
+    private func areAnnotationsConnected(_ lhs: PDFAnnotation, _ rhs: PDFAnnotation) -> Bool {
+        let lhsBounds = lhs.bounds
+        let rhsBounds = rhs.bounds
+        let expandedLHS = lhsBounds.insetBy(dx: -2.0, dy: -6.0)
+        if expandedLHS.intersects(rhsBounds) {
+            return true
+        }
+
+        let overlapWidth = max(
+            0.0,
+            min(lhsBounds.maxX, rhsBounds.maxX) - max(lhsBounds.minX, rhsBounds.minX)
+        )
+        let minWidth = max(1.0, min(lhsBounds.width, rhsBounds.width))
+        let horizontalOverlapRatio = overlapWidth / minWidth
+        let verticalGap = max(
+            0.0,
+            max(lhsBounds.minY - rhsBounds.maxY, rhsBounds.minY - lhsBounds.maxY)
+        )
+
+        return horizontalOverlapRatio > 0.5 && verticalGap <= 10.0
+    }
+
+    private func colorsAreClose(_ lhs: NSColor?, _ rhs: NSColor?) -> Bool {
+        guard let lhs, let rhs else { return lhs == nil && rhs == nil }
+        let lhsRGB = lhs.usingColorSpace(.deviceRGB)
+        let rhsRGB = rhs.usingColorSpace(.deviceRGB)
+        guard let lhsRGB, let rhsRGB else { return false }
+
+        let threshold: CGFloat = 0.08
+        return abs(lhsRGB.redComponent - rhsRGB.redComponent) <= threshold
+            && abs(lhsRGB.greenComponent - rhsRGB.greenComponent) <= threshold
+            && abs(lhsRGB.blueComponent - rhsRGB.blueComponent) <= threshold
+            && abs(lhsRGB.alphaComponent - rhsRGB.alphaComponent) <= threshold
+    }
+
+    private func removeAnnotation(_ target: PDFAnnotation, from page: PDFPage) -> Bool {
+        if let exact = page.annotations.first(where: { $0 === target }) {
+            removeAnnotationAndRelatedNotes(exact, from: page)
+            return true
+        }
+        if let matched = page.annotations.first(where: { annotationsLikelySame($0, target) }) {
+            removeAnnotationAndRelatedNotes(matched, from: page)
+            return true
+        }
+        return false
+    }
+
+    private func removeAnnotationAndRelatedNotes(_ target: PDFAnnotation, from page: PDFPage) {
+        var toRemove: [PDFAnnotation] = [target]
+
+        if let popup = target.value(forAnnotationKey: .popup) as? PDFAnnotation {
+            toRemove.append(popup)
+        }
+
+        for candidate in page.annotations {
+            if let parent = candidate.value(forAnnotationKey: .parent) as? PDFAnnotation {
+                if parent === target || annotationsLikelySame(parent, target) {
+                    toRemove.append(candidate)
+                }
+            }
+        }
+
+        var removed = Set<ObjectIdentifier>()
+        for annotation in toRemove {
+            let id = ObjectIdentifier(annotation)
+            guard removed.insert(id).inserted else { continue }
+            page.removeAnnotation(annotation)
+        }
+    }
+
+    private func annotationsLikelySame(_ lhs: PDFAnnotation, _ rhs: PDFAnnotation) -> Bool {
+        let lhsType = lhs.type ?? ""
+        let rhsType = rhs.type ?? ""
+        if lhsType != rhsType {
+            return false
+        }
+
+        let dx = abs(lhs.bounds.origin.x - rhs.bounds.origin.x)
+        let dy = abs(lhs.bounds.origin.y - rhs.bounds.origin.y)
+        let dw = abs(lhs.bounds.size.width - rhs.bounds.size.width)
+        let dh = abs(lhs.bounds.size.height - rhs.bounds.size.height)
+
+        return dx < 0.5 && dy < 0.5 && dw < 0.5 && dh < 0.5
     }
 
     private func saveCurrentDocument() {
