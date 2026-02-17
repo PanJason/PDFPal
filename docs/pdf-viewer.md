@@ -5,7 +5,8 @@ The PDF Viewer component hosts a native PDFKit view inside SwiftUI. It handles
 loading a local PDF file, shows an empty or error state when appropriate, and
 adds context menu actions for Ask LLM and PDF annotations. It supports
 highlighting selections with color, underlining, strikethrough, and editing
-annotation notes from a right-click menu on existing annotations.
+annotation notes from a right-click menu on existing annotations. Existing
+annotations can also be removed, and existing notes can be removed directly.
 
 ## Public API
 ```swift
@@ -46,7 +47,8 @@ struct PDFKitContainer: NSViewRepresentable {}
  *
  * Adds:
  * - "Annotate Selection" submenu (highlight colors, underline, strikethrough)
- * - "Add/Edit Note..." when right-clicking an existing annotation
+ * - "Remove Highlight/Underline/Strikethrough" on annotation right-click
+ * - "Add/Edit Note..." and "Remove Note" on annotation right-click
  * - "Ask LLM" on current text selection
  */
 final class PDFKitView: PDFView {}
