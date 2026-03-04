@@ -158,26 +158,285 @@ final class PDFKitView: PDFView {
         askItem.tag = 9100
         menu.addItem(askItem)
 
-        retargetRemoveAnnotationItems(in: menu)
+        retargetAnnotationMenuItems(in: menu)
         return menu
     }
 
-    private func retargetRemoveAnnotationItems(in menu: NSMenu) {
+    private func retargetAnnotationMenuItems(in menu: NSMenu) {
+        replaceSystemMarkupStylePicker(in: menu)
+
+        let itemSummaries = menu.items.enumerated().map { (index, item) in
+            contextMenuDebugSummary(for: item, index: index)
+        }
         for item in menu.items {
             if let submenu = item.submenu {
-                retargetRemoveAnnotationItems(in: submenu)
+                retargetAnnotationMenuItems(in: submenu)
             }
 
-            let lowerTitle = item.title.lowercased()
+            let lowerTitle = item.title
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
             let isRemoveAnnotationAction = lowerTitle == "remove annotation"
                 || lowerTitle == "remove highlight"
                 || lowerTitle == "remove underline"
                 || lowerTitle == "remove strikethrough"
-            guard isRemoveAnnotationAction else { continue }
+            if isRemoveAnnotationAction {
+                item.action = #selector(handleRemoveAnnotation)
+                item.target = self
+                continue
+            }
 
-            item.action = #selector(handleRemoveAnnotation)
-            item.target = self
+            if let colorAction = colorActionForContextMenuItem(item) {
+                item.action = #selector(handleContextColorSelection(_:))
+                item.target = self
+                item.representedObject = colorAction
+                continue
+            }
+
+            if isUnderlineContextItem(item, lowerTitle: lowerTitle) {
+                item.action = #selector(handleContextUnderlineToggle(_:))
+                item.target = self
+                continue
+            }
+
+            if isStrikeContextItem(item, lowerTitle: lowerTitle) {
+                item.action = #selector(handleContextStrikeToggle(_:))
+                item.target = self
+            }
         }
+    }
+
+    private func replaceSystemMarkupStylePicker(in menu: NSMenu) {
+        guard let pickerIndex = menu.items.firstIndex(where: { item in
+            guard let view = item.view else { return false }
+            return String(describing: type(of: view)).contains("PDFMarkupStylePicker")
+        }) else {
+            return
+        }
+
+        let replacementItem = NSMenuItem()
+        replacementItem.view = makeMarkupStylePickerView()
+        menu.removeItem(at: pickerIndex)
+        menu.insertItem(replacementItem, at: pickerIndex)
+    }
+
+    private func makeMarkupStylePickerView() -> NSView {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 30))
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
+        ])
+
+        let colorButtons: [(PDFAnnotationAction, NSColor)] = [
+            (.highlightYellow, NSColor.systemYellow),
+            (.highlightGreen, NSColor.systemGreen),
+            (.highlightBlue, NSColor.systemBlue),
+            (.highlightPink, NSColor.systemPink),
+            (.highlightPurple, NSColor.systemPurple),
+        ]
+
+        for (action, color) in colorButtons {
+            stack.addArrangedSubview(makeColorPickerButton(action: action, color: color))
+        }
+        stack.addArrangedSubview(makeTextStylePickerButton(action: .underline, text: "U", underline: true))
+        stack.addArrangedSubview(makeTextStylePickerButton(action: .strikeOut, text: "S", underline: false))
+
+        return container
+    }
+
+    private func makeColorPickerButton(action: PDFAnnotationAction, color: NSColor) -> NSButton {
+        let button = NSButton(title: "", target: self, action: #selector(handleMarkupStylePickerButton(_:)))
+        button.tag = markupPickerTag(for: action)
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.backgroundColor = color.cgColor
+        button.layer?.cornerRadius = 10
+        button.layer?.borderWidth = 1
+        button.layer?.borderColor = NSColor.black.withAlphaComponent(0.15).cgColor
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 20),
+            button.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        return button
+    }
+
+    private func makeTextStylePickerButton(
+        action: PDFAnnotationAction,
+        text: String,
+        underline: Bool
+    ) -> NSButton {
+        let button = NSButton(title: "", target: self, action: #selector(handleMarkupStylePickerButton(_:)))
+        button.tag = markupPickerTag(for: action)
+        button.bezelStyle = .texturedRounded
+        button.controlSize = .small
+
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        if underline {
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        } else {
+            attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+        }
+        button.attributedTitle = NSAttributedString(string: text, attributes: attributes)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 24),
+            button.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        return button
+    }
+
+    private func markupPickerTag(for action: PDFAnnotationAction) -> Int {
+        switch action {
+        case .highlightYellow:
+            return 9401
+        case .highlightGreen:
+            return 9402
+        case .highlightBlue:
+            return 9403
+        case .highlightPink:
+            return 9404
+        case .highlightPurple:
+            return 9405
+        case .underline:
+            return 9406
+        case .strikeOut:
+            return 9407
+        }
+    }
+
+    private func markupPickerAction(for tag: Int) -> PDFAnnotationAction? {
+        switch tag {
+        case 9401:
+            return .highlightYellow
+        case 9402:
+            return .highlightGreen
+        case 9403:
+            return .highlightBlue
+        case 9404:
+            return .highlightPink
+        case 9405:
+            return .highlightPurple
+        case 9406:
+            return .underline
+        case 9407:
+            return .strikeOut
+        default:
+            return nil
+        }
+    }
+
+    @objc private func handleMarkupStylePickerButton(_ sender: NSButton) {
+        guard let action = markupPickerAction(for: sender.tag) else { return }
+        switch action {
+        case .underline:
+            applyContextUnderlineToggle()
+        case .strikeOut:
+            applyContextStrikeToggle()
+        case .highlightYellow, .highlightGreen, .highlightBlue, .highlightPink, .highlightPurple:
+            applyContextColorAction(action)
+        }
+        sender.enclosingMenuItem?.menu?.cancelTracking()
+    }
+
+    private func contextMenuDebugSummary(for item: NSMenuItem, index: Int) -> String {
+        let title = item.title.replacingOccurrences(of: "\"", with: "\\\"")
+        let attributedTitle = item.attributedTitle?.string.replacingOccurrences(of: "\"", with: "\\\"") ?? ""
+        let actionName = item.action.map { NSStringFromSelector($0) } ?? "nil"
+        let representedType = item.representedObject.map { String(describing: type(of: $0)) } ?? "nil"
+        let hasImage = item.image != nil
+        let submenuTitle = item.submenu?.title ?? "nil"
+        let viewSummary = item.view.map { debugViewSummary($0) } ?? "nil"
+
+        return "[\(index)] title=\"\(title)\" attributed=\"\(attributedTitle)\" action=\(actionName) represented=\(representedType) image=\(hasImage) separator=\(item.isSeparatorItem) submenu=\(submenuTitle) view=\(viewSummary)"
+    }
+
+    private func debugViewSummary(_ view: NSView) -> String {
+        var parts: [String] = []
+        appendDebugViewTree(view, depth: 0, maxDepth: 3, into: &parts)
+        return parts.joined(separator: " | ")
+    }
+
+    private func appendDebugViewTree(
+        _ view: NSView,
+        depth: Int,
+        maxDepth: Int,
+        into parts: inout [String]
+    ) {
+        let className = String(describing: type(of: view))
+        var node = "\(String(repeating: ">", count: depth))\(className)"
+
+        if let button = view as? NSButton {
+            let buttonTitle = button.title.replacingOccurrences(of: "\"", with: "\\\"")
+            let buttonAction = button.action.map { NSStringFromSelector($0) } ?? "nil"
+            node += "(title=\"\(buttonTitle)\", action=\(buttonAction), tag=\(button.tag), state=\(button.state.rawValue))"
+        } else if let control = view as? NSControl {
+            node += "(tag=\(control.tag))"
+        }
+
+        if let toolTip = view.toolTip, !toolTip.isEmpty {
+            let escaped = toolTip.replacingOccurrences(of: "\"", with: "\\\"")
+            node += "(toolTip=\"\(escaped)\")"
+        }
+
+        parts.append(node)
+
+        guard depth < maxDepth else { return }
+        for subview in view.subviews {
+            appendDebugViewTree(subview, depth: depth + 1, maxDepth: maxDepth, into: &parts)
+        }
+    }
+
+    private func colorActionForContextMenuItem(_ item: NSMenuItem) -> PDFAnnotationAction? {
+        let lowerTitle = item.title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let selectorName = (item.action.map { NSStringFromSelector($0) } ?? "").lowercased()
+
+        if lowerTitle.contains("yellow") || selectorName.contains("yellow") {
+            return .highlightYellow
+        }
+        if lowerTitle.contains("green") || selectorName.contains("green") {
+            return .highlightGreen
+        }
+        if lowerTitle.contains("blue") || selectorName.contains("blue") {
+            return .highlightBlue
+        }
+        if lowerTitle.contains("pink") || selectorName.contains("pink") {
+            return .highlightPink
+        }
+        if lowerTitle.contains("purple") || selectorName.contains("purple") {
+            return .highlightPurple
+        }
+        return nil
+    }
+
+    private func isUnderlineContextItem(_ item: NSMenuItem, lowerTitle: String) -> Bool {
+        if lowerTitle.contains("underline") {
+            return true
+        }
+        let selectorName = (item.action.map { NSStringFromSelector($0) } ?? "").lowercased()
+        return selectorName.contains("underline")
+    }
+
+    private func isStrikeContextItem(_ item: NSMenuItem, lowerTitle: String) -> Bool {
+        if lowerTitle.contains("strikethrough") || lowerTitle.contains("strike") {
+            return true
+        }
+        let selectorName = (item.action.map { NSStringFromSelector($0) } ?? "").lowercased()
+        return selectorName.contains("strike")
     }
 
     @objc private func handleAskLLM() {
@@ -214,6 +473,81 @@ final class PDFKitView: PDFView {
         } else {
             NSSound.beep()
         }
+    }
+
+    @objc private func handleContextColorSelection(_ sender: Any?) {
+        let action: PDFAnnotationAction?
+        if let item = sender as? NSMenuItem {
+            action = item.representedObject as? PDFAnnotationAction
+        } else if let button = sender as? NSButton {
+            action = markupPickerAction(for: button.tag)
+        } else {
+            action = nil
+        }
+        guard let action else { return }
+        applyContextColorAction(action)
+    }
+
+    private func applyContextColorAction(_ action: PDFAnnotationAction) {
+        guard let (page, seeds) = contextMarkupTargets() else {
+            // When no existing markup is under the cursor, apply to selected text.
+            applyAnnotation(action, selection: currentSelection, beepOnEmpty: true)
+            return
+        }
+
+        currentAnnotationAction = action
+        let cluster = connectedRemovableAnnotations(from: seeds, on: page)
+        let anchorBounds = uniqueBounds(from: cluster.isEmpty ? seeds : cluster)
+        guard !anchorBounds.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        let highlights = markupAnnotations(
+            on: page,
+            subtype: .highlight,
+            overlappingAny: anchorBounds
+        )
+        let newColor = annotationStyle(for: action).color
+
+        if highlights.isEmpty {
+            for bounds in anchorBounds {
+                if hasEquivalentAnnotation(on: page, action: action, bounds: bounds) {
+                    continue
+                }
+                let annotation = makeAnnotation(for: action, bounds: bounds)
+                page.addAnnotation(annotation)
+            }
+            return
+        }
+
+        for annotation in highlights {
+            annotation.color = newColor
+        }
+    }
+
+    @objc private func handleContextUnderlineToggle(_ sender: NSMenuItem) {
+        applyContextUnderlineToggle()
+    }
+
+    @objc private func handleContextStrikeToggle(_ sender: NSMenuItem) {
+        applyContextStrikeToggle()
+    }
+
+    private func applyContextUnderlineToggle() {
+        if contextMarkupTargets() != nil {
+            toggleOverlayMarkup(.underline)
+            return
+        }
+        applyAnnotation(.underline, selection: currentSelection, beepOnEmpty: true)
+    }
+
+    private func applyContextStrikeToggle() {
+        if contextMarkupTargets() != nil {
+            toggleOverlayMarkup(.strikeOut)
+            return
+        }
+        applyAnnotation(.strikeOut, selection: currentSelection, beepOnEmpty: true)
     }
 
     private func registerAnnotationObserver() {
@@ -270,6 +604,135 @@ final class PDFKitView: PDFView {
         pendingModeApplyWorkItem = workItem
         // Wait for selection updates to settle so highlight is applied once.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+    }
+
+    private func contextMarkupTargets() -> (page: PDFPage, seeds: [PDFAnnotation])? {
+        guard let page = contextMenuPage ?? contextMenuAnnotation?.page ?? currentPage else {
+            return nil
+        }
+
+        if let point = contextMenuPointOnPage {
+            let hits = removableAnnotations(at: point, on: page)
+            if !hits.isEmpty {
+                return (page, hits)
+            }
+        }
+
+        if let selection = currentSelection {
+            let hits = removableAnnotations(intersecting: selection, on: page)
+            if !hits.isEmpty {
+                return (page, hits)
+            }
+        }
+
+        if let annotation = contextMenuAnnotation, isRemovableMarkup(annotation) {
+            return (page, [annotation])
+        }
+
+        return nil
+    }
+
+    private func toggleOverlayMarkup(_ subtype: PDFAnnotationSubtype) {
+        guard let (page, seeds) = contextMarkupTargets() else {
+            NSSound.beep()
+            return
+        }
+
+        let cluster = connectedRemovableAnnotations(from: seeds, on: page)
+        let anchorCluster = cluster.isEmpty ? seeds : cluster
+        let anchorBounds = preferredOverlayAnchorBounds(from: anchorCluster, on: page)
+        guard !anchorBounds.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        let allBoundsHaveOverlay = anchorBounds.allSatisfy { bounds in
+            !matchingMarkupAnnotations(on: page, subtype: subtype, around: bounds).isEmpty
+        }
+
+        if allBoundsHaveOverlay {
+            var removed = Set<ObjectIdentifier>()
+            for bounds in anchorBounds {
+                let overlays = matchingMarkupAnnotations(on: page, subtype: subtype, around: bounds)
+                for annotation in overlays {
+                    let id = ObjectIdentifier(annotation)
+                    if !removed.insert(id).inserted {
+                        continue
+                    }
+                    removeAnnotationAndRelatedNotes(annotation, from: page)
+                }
+            }
+            return
+        }
+
+        for bounds in anchorBounds {
+            let overlays = matchingMarkupAnnotations(on: page, subtype: subtype, around: bounds)
+            if !overlays.isEmpty {
+                continue
+            }
+            let annotation = PDFAnnotation(bounds: bounds, forType: subtype, withProperties: nil)
+            annotation.color = preferredOverlayColor(on: page, bounds: bounds)
+            page.addAnnotation(annotation)
+        }
+    }
+
+    private func preferredOverlayAnchorBounds(from cluster: [PDFAnnotation], on page: PDFPage) -> [CGRect] {
+        let baseBounds = uniqueBounds(from: cluster)
+        let highlightBounds = uniqueBounds(
+            from: markupAnnotations(on: page, subtype: .highlight, overlappingAny: baseBounds)
+        )
+        return highlightBounds.isEmpty ? baseBounds : highlightBounds
+    }
+
+    private func preferredOverlayColor(on page: PDFPage, bounds: CGRect) -> NSColor {
+        let highlights = matchingMarkupAnnotations(on: page, subtype: .highlight, around: bounds)
+        if let color = highlights.first?.color {
+            return color
+        }
+        switch currentAnnotationAction {
+        case .highlightYellow, .highlightGreen, .highlightBlue, .highlightPink, .highlightPurple:
+            return annotationStyle(for: currentAnnotationAction).color
+        case .underline, .strikeOut:
+            return annotationStyle(for: .highlightYellow).color
+        }
+    }
+
+    private func matchingMarkupAnnotations(
+        on page: PDFPage,
+        subtype: PDFAnnotationSubtype,
+        around bounds: CGRect
+    ) -> [PDFAnnotation] {
+        let expanded = bounds.insetBy(dx: -2.0, dy: -2.0)
+        return page.annotations.filter { annotation in
+            guard annotationTypeMatches(annotation, subtype: subtype) else { return false }
+            return boundsAreClose(annotation.bounds, bounds) || expanded.intersects(annotation.bounds)
+        }
+    }
+
+    private func markupAnnotations(
+        on page: PDFPage,
+        subtype: PDFAnnotationSubtype,
+        overlappingAny boundsList: [CGRect]
+    ) -> [PDFAnnotation] {
+        guard !boundsList.isEmpty else { return [] }
+        return page.annotations.filter { annotation in
+            guard annotationTypeMatches(annotation, subtype: subtype) else { return false }
+            return boundsList.contains(where: { bounds in
+                let expanded = bounds.insetBy(dx: -2.0, dy: -2.0)
+                return expanded.intersects(annotation.bounds) || boundsAreClose(annotation.bounds, bounds)
+            })
+        }
+    }
+
+    private func uniqueBounds(from annotations: [PDFAnnotation]) -> [CGRect] {
+        var result: [CGRect] = []
+        for annotation in annotations {
+            if result.contains(where: { boundsAreClose($0, annotation.bounds) }) {
+                continue
+            }
+            result.append(annotation.bounds)
+        }
+        return result
     }
 
     private func applyAnnotation(_ action: PDFAnnotationAction) {
