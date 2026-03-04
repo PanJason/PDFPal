@@ -89,6 +89,8 @@ struct PDFKitContainer: NSViewRepresentable {
 }
 
 final class PDFKitView: PDFView {
+    private static let markupGroupPrefix = "pdfpal-group:"
+
     var onAskLLM: ((String) -> Void)?
     private var lastSelectionText: String = ""
     private var contextMenuAnnotation: PDFAnnotation?
@@ -164,10 +166,6 @@ final class PDFKitView: PDFView {
 
     private func retargetAnnotationMenuItems(in menu: NSMenu) {
         replaceSystemMarkupStylePicker(in: menu)
-
-        let itemSummaries = menu.items.enumerated().map { (index, item) in
-            contextMenuDebugSummary(for: item, index: index)
-        }
         for item in menu.items {
             if let submenu = item.submenu {
                 retargetAnnotationMenuItems(in: submenu)
@@ -190,6 +188,12 @@ final class PDFKitView: PDFView {
                 item.action = #selector(handleContextColorSelection(_:))
                 item.target = self
                 item.representedObject = colorAction
+                continue
+            }
+
+            if lowerTitle == "add note" {
+                item.action = #selector(handleAddNoteFromContextMenu(_:))
+                item.target = self
                 continue
             }
 
@@ -511,11 +515,13 @@ final class PDFKitView: PDFView {
         let newColor = annotationStyle(for: action).color
 
         if highlights.isEmpty {
+            let groupID = UUID().uuidString
             for bounds in anchorBounds {
                 if hasEquivalentAnnotation(on: page, action: action, bounds: bounds) {
                     continue
                 }
                 let annotation = makeAnnotation(for: action, bounds: bounds)
+                setMarkupGroupID(groupID, on: annotation)
                 page.addAnnotation(annotation)
             }
             return
@@ -523,6 +529,18 @@ final class PDFKitView: PDFView {
 
         for annotation in highlights {
             annotation.color = newColor
+        }
+    }
+
+    @objc private func handleAddNoteFromContextMenu(_ sender: NSMenuItem) {
+        let targetPage = contextMenuPage ?? contextMenuAnnotation?.page ?? currentPage
+        let targetMarkup = contextMenuAnnotation
+
+        _ = NSApp.sendAction(NSSelectorFromString("_addNote:"), to: nil, from: sender)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.normalizeRelatedNoteColors(on: targetPage, targetMarkup: targetMarkup)
         }
     }
 
@@ -665,6 +683,7 @@ final class PDFKitView: PDFView {
             return
         }
 
+        let overlayGroupID = UUID().uuidString
         for bounds in anchorBounds {
             let overlays = matchingMarkupAnnotations(on: page, subtype: subtype, around: bounds)
             if !overlays.isEmpty {
@@ -672,6 +691,7 @@ final class PDFKitView: PDFView {
             }
             let annotation = PDFAnnotation(bounds: bounds, forType: subtype, withProperties: nil)
             annotation.color = preferredOverlayColor(on: page, bounds: bounds)
+            setMarkupGroupID(overlayGroupID, on: annotation)
             page.addAnnotation(annotation)
         }
     }
@@ -685,16 +705,7 @@ final class PDFKitView: PDFView {
     }
 
     private func preferredOverlayColor(on page: PDFPage, bounds: CGRect) -> NSColor {
-        let highlights = matchingMarkupAnnotations(on: page, subtype: .highlight, around: bounds)
-        if let color = highlights.first?.color {
-            return color
-        }
-        switch currentAnnotationAction {
-        case .highlightYellow, .highlightGreen, .highlightBlue, .highlightPink, .highlightPurple:
-            return annotationStyle(for: currentAnnotationAction).color
-        case .underline, .strikeOut:
-            return annotationStyle(for: .highlightYellow).color
-        }
+        return annotationStyle(for: .underline).color
     }
 
     private func matchingMarkupAnnotations(
@@ -755,6 +766,7 @@ final class PDFKitView: PDFView {
             return
         }
 
+        let groupID = UUID().uuidString
         for lineSelection in lineSelections {
             guard let page = lineSelection.pages.first else { continue }
             let bounds = lineSelection.bounds(for: page)
@@ -765,6 +777,7 @@ final class PDFKitView: PDFView {
                 continue
             }
             let annotation = makeAnnotation(for: action, bounds: bounds)
+            setMarkupGroupID(groupID, on: annotation)
             page.addAnnotation(annotation)
         }
     }
@@ -830,17 +843,17 @@ final class PDFKitView: PDFView {
     private func annotationStyle(for action: PDFAnnotationAction) -> (type: PDFAnnotationSubtype, color: NSColor) {
         switch action {
         case .highlightYellow:
-            return (.highlight, NSColor.systemYellow.withAlphaComponent(0.35))
+            return (.highlight, baseColor(for: .highlightYellow).withAlphaComponent(0.35))
         case .highlightGreen:
-            return (.highlight, NSColor.systemGreen.withAlphaComponent(0.35))
+            return (.highlight, baseColor(for: .highlightGreen).withAlphaComponent(0.35))
         case .highlightBlue:
-            return (.highlight, NSColor.systemBlue.withAlphaComponent(0.35))
+            return (.highlight, baseColor(for: .highlightBlue).withAlphaComponent(0.35))
         case .highlightPink:
-            return (.highlight, NSColor.systemPink.withAlphaComponent(0.35))
+            return (.highlight, baseColor(for: .highlightPink).withAlphaComponent(0.35))
         case .highlightPurple:
-            return (.highlight, NSColor.systemPurple.withAlphaComponent(0.35))
+            return (.highlight, baseColor(for: .highlightPurple).withAlphaComponent(0.35))
         case .underline:
-            return (.underline, NSColor.systemYellow)
+            return (.underline, NSColor.systemRed)
         case .strikeOut:
             return (.strikeOut, NSColor.systemRed)
         }
@@ -851,7 +864,56 @@ final class PDFKitView: PDFView {
         return page.annotations.contains { annotation in
             guard annotationTypeMatches(annotation, subtype: expected.type) else { return false }
             guard boundsAreClose(annotation.bounds, bounds) else { return false }
+            if action == .underline || action == .strikeOut {
+                return true
+            }
             return colorsAreClose(annotation.color, expected.color)
+        }
+    }
+
+    private func baseColor(for action: PDFAnnotationAction) -> NSColor {
+        switch action {
+        case .highlightYellow:
+            return NSColor.systemYellow
+        case .highlightGreen:
+            return NSColor.systemGreen
+        case .highlightBlue:
+            return NSColor.systemBlue
+        case .highlightPink:
+            return NSColor.systemPink
+        case .highlightPurple:
+            return NSColor.systemPurple
+        case .underline, .strikeOut:
+            return NSColor.systemRed
+        }
+    }
+
+    private func normalizeRelatedNoteColors(on page: PDFPage?, targetMarkup: PDFAnnotation?) {
+        guard let page else { return }
+
+        for annotation in page.annotations {
+            let typeName = (annotation.type ?? "").lowercased()
+            guard typeName.contains("text") || typeName.contains("popup") else { continue }
+
+            let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation
+            let popupParent = annotation.value(forAnnotationKey: .popup) as? PDFAnnotation
+
+            let isRelatedToTarget =
+                (targetMarkup != nil && (parent === targetMarkup || popupParent === targetMarkup))
+                || (targetMarkup != nil && parent.map { annotationsLikelySame($0, targetMarkup!) } == true)
+
+            let isMarkupNote = parent.map(isRemovableMarkup) ?? false
+
+            guard isRelatedToTarget || isMarkupNote else { continue }
+
+            annotation.color = NSColor.white
+            if let popup = annotation.popup {
+                popup.color = NSColor.white
+            }
+        }
+
+        if let popup = targetMarkup?.popup {
+            popup.color = NSColor.white
         }
     }
 
@@ -925,32 +987,38 @@ final class PDFKitView: PDFView {
 
     private func connectedRemovableAnnotations(from seeds: [PDFAnnotation], on page: PDFPage) -> [PDFAnnotation] {
         let removable = page.annotations.filter(isRemovableMarkup)
-        guard !removable.isEmpty else { return [] }
-
         var result: [PDFAnnotation] = []
         var visited = Set<ObjectIdentifier>()
-        var queue = seeds.filter(isRemovableMarkup)
-        if queue.isEmpty { return [] }
-
-        while !queue.isEmpty {
-            let current = queue.removeFirst()
-            let currentID = ObjectIdentifier(current)
-            guard visited.insert(currentID).inserted else { continue }
-            result.append(current)
-
-            for candidate in removable {
-                let candidateID = ObjectIdentifier(candidate)
-                if visited.contains(candidateID) {
-                    continue
-                }
-                if isSameMarkupGroup(candidate, as: current)
-                    && areAnnotationsConnected(current, candidate) {
-                    queue.append(candidate)
-                }
+        for annotation in seeds where isRemovableMarkup(annotation) {
+            for grouped in groupedAnnotations(for: annotation, in: removable) {
+                let annotationID = ObjectIdentifier(grouped)
+                guard visited.insert(annotationID).inserted else { continue }
+                result.append(grouped)
             }
         }
-
         return result
+    }
+
+    private func groupedAnnotations(for seed: PDFAnnotation, in candidates: [PDFAnnotation]) -> [PDFAnnotation] {
+        guard let groupID = markupGroupID(of: seed) else {
+            return [seed]
+        }
+        let seedType = (seed.type ?? "").lowercased()
+        return candidates.filter { candidate in
+            let candidateType = (candidate.type ?? "").lowercased()
+            guard candidateType == seedType else { return false }
+            return markupGroupID(of: candidate) == groupID
+        }
+    }
+
+    private func setMarkupGroupID(_ groupID: String, on annotation: PDFAnnotation) {
+        annotation.userName = "\(Self.markupGroupPrefix)\(groupID)"
+    }
+
+    private func markupGroupID(of annotation: PDFAnnotation) -> String? {
+        guard let userName = annotation.userName else { return nil }
+        guard userName.hasPrefix(Self.markupGroupPrefix) else { return nil }
+        return String(userName.dropFirst(Self.markupGroupPrefix.count))
     }
 
     private func isRemovableMarkup(_ annotation: PDFAnnotation) -> Bool {
@@ -958,35 +1026,6 @@ final class PDFKitView: PDFView {
         return typeName.contains("highlight")
             || typeName.contains("underline")
             || typeName.contains("strike")
-    }
-
-    private func isSameMarkupGroup(_ lhs: PDFAnnotation, as rhs: PDFAnnotation) -> Bool {
-        let lhsType = (lhs.type ?? "").lowercased()
-        let rhsType = (rhs.type ?? "").lowercased()
-        guard lhsType == rhsType else { return false }
-        return colorsAreClose(lhs.color, rhs.color)
-    }
-
-    private func areAnnotationsConnected(_ lhs: PDFAnnotation, _ rhs: PDFAnnotation) -> Bool {
-        let lhsBounds = lhs.bounds
-        let rhsBounds = rhs.bounds
-        let expandedLHS = lhsBounds.insetBy(dx: -2.0, dy: -6.0)
-        if expandedLHS.intersects(rhsBounds) {
-            return true
-        }
-
-        let overlapWidth = max(
-            0.0,
-            min(lhsBounds.maxX, rhsBounds.maxX) - max(lhsBounds.minX, rhsBounds.minX)
-        )
-        let minWidth = max(1.0, min(lhsBounds.width, rhsBounds.width))
-        let horizontalOverlapRatio = overlapWidth / minWidth
-        let verticalGap = max(
-            0.0,
-            max(lhsBounds.minY - rhsBounds.maxY, rhsBounds.minY - lhsBounds.maxY)
-        )
-
-        return horizontalOverlapRatio > 0.5 && verticalGap <= 10.0
     }
 
     private func colorsAreClose(_ lhs: NSColor?, _ rhs: NSColor?) -> Bool {
