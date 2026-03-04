@@ -79,6 +79,17 @@ struct PDFEmptyState: View {}
 - File menu save (`Cmd+S`) posts `pdfSaveDocument`; the PDF view persists all
   annotation and note edits to disk.
 
+## Context Menu Markup Picker
+- The annotation context menu keeps a compact first-row markup picker for
+  highlight colors, underline, and strikethrough.
+- The picker is implemented as a custom menu view so the app can keep the
+  compact control layout while routing each click through app-owned handlers.
+- Clicking a color on existing highlight markup updates that markup color.
+- Clicking underline or strikethrough on existing markup toggles the matching
+  overlay annotation.
+- When no existing markup is under the context click, the same controls apply
+  the requested annotation style to the current text selection.
+
 ## Usage Examples
 ```swift
 PDFViewer(fileURL: fileURL) { selection in
