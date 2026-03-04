@@ -41,6 +41,12 @@ struct LLMPaperReadingHelperApp: App {
                 }
                 .keyboardShortcut("s", modifiers: [.command])
             }
+            CommandGroup(after: .textEditing) {
+                Button("Find in PDF") {
+                    NotificationCenter.default.post(name: .pdfFocusSearch, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: [.command])
+            }
             TextEditingCommands()
         }
     }
@@ -57,13 +63,22 @@ struct AppShellView: View {
     @State private var selectedProvider: LLMProvider = .openAI
     @State private var selectedAnnotationAction: PDFAnnotationAction = .highlightYellow
     @State private var isHighlighterModeEnabled = false
+    @State private var searchQuery = ""
+    @State private var searchMode: PDFSearchMode = .exactPhrase
+    @State private var keyEventMonitor: Any?
+    @State private var searchFocusRequestID = 0
     @StateObject private var openAISessionStore = SessionStore(provider: .openAI)
     @StateObject private var claudeSessionStore = SessionStore(provider: .claude)
     @StateObject private var geminiSessionStore = SessionStore(provider: .gemini)
 
     var body: some View {
         HSplitView {
-            PDFViewer(fileURL: fileURL, onAskLLM: handleAskLLM)
+            PDFViewer(
+                fileURL: fileURL,
+                onAskLLM: handleAskLLM,
+                searchQuery: searchQuery,
+                searchMode: searchMode
+            )
             .frame(minWidth: 360)
 
             if isChatVisible {
@@ -154,6 +169,11 @@ struct AppShellView: View {
                 } label: {
                     Image(systemName: "sidebar.squares.left")
                 }
+                PDFSearchToolbarField(
+                    query: $searchQuery,
+                    mode: $searchMode,
+                    focusRequestID: searchFocusRequestID
+                )
             }
         }
         .fileImporter(
@@ -188,6 +208,15 @@ struct AppShellView: View {
             if let enabled = notification.object as? Bool {
                 isHighlighterModeEnabled = enabled
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pdfFocusSearch)) { _ in
+            requestSearchFocus()
+        }
+        .onAppear {
+            installFindShortcutMonitorIfNeeded()
+        }
+        .onDisappear {
+            removeFindShortcutMonitor()
         }
         .alert("Could not open PDF", isPresented: $isShowingOpenError) {
             Button("OK", role: .cancel) {}
@@ -339,6 +368,32 @@ struct AppShellView: View {
         )
     }
 
+    private func installFindShortcutMonitorIfNeeded() {
+        guard keyEventMonitor == nil else { return }
+        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let isFindShortcut = modifiers.contains(.command)
+                && !modifiers.contains(.control)
+                && !modifiers.contains(.option)
+                && event.charactersIgnoringModifiers?.lowercased() == "f"
+            if isFindShortcut {
+                requestSearchFocus()
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func removeFindShortcutMonitor() {
+        guard let keyEventMonitor else { return }
+        NSEvent.removeMonitor(keyEventMonitor)
+        self.keyEventMonitor = nil
+    }
+
+    private func requestSearchFocus() {
+        searchFocusRequestID &+= 1
+    }
+
     private func annotationColorIcon(_ color: NSColor) -> Image {
         Image(nsImage: colorCircleImage(color))
             .renderingMode(.original)
@@ -393,6 +448,126 @@ struct AppShellView: View {
                 isSessionSidebarVisible: $isSessionSidebarVisible,
                 onClose: { isChatVisible = false }
             )
+        }
+    }
+}
+
+private struct PDFSearchToolbarField: View {
+    @Binding var query: String
+    @Binding var mode: PDFSearchMode
+    let focusRequestID: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Menu {
+                ForEach(PDFSearchMode.allCases) { option in
+                    Button {
+                        mode = option
+                    } label: {
+                        if mode == option {
+                            Label(option.title, systemImage: "checkmark")
+                        } else {
+                            Text(option.title)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "magnifyingglass")
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            PDFSearchTextField(
+                text: $query,
+                focusRequestID: focusRequestID
+            )
+            .frame(minWidth: 160)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(nsColor: .textBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(
+                    Color.secondary.opacity(0.35),
+                    lineWidth: 1
+                )
+        )
+        .frame(width: 260)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("PDF Search")
+    }
+}
+
+private struct PDFSearchTextField: NSViewRepresentable {
+    @Binding var text: String
+    let focusRequestID: Int
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField(frame: .zero)
+        field.placeholderString = "Search"
+        field.bezelStyle = .roundedBezel
+        field.sendsSearchStringImmediately = true
+        field.sendsWholeSearchString = false
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.searchTextChanged(_:))
+        field.delegate = context.coordinator
+        return field
+    }
+
+    func updateNSView(_ nsView: NSSearchField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+
+        if context.coordinator.lastFocusRequestID != focusRequestID {
+            context.coordinator.lastFocusRequestID = focusRequestID
+            DispatchQueue.main.async {
+                nsView.window?.makeFirstResponder(nsView)
+                if let editor = nsView.currentEditor() {
+                    editor.selectedRange = NSRange(location: 0, length: nsView.stringValue.count)
+                }
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: PDFSearchTextField
+        var lastFocusRequestID: Int = -1
+
+        init(_ parent: PDFSearchTextField) {
+            self.parent = parent
+        }
+
+        @objc func searchTextChanged(_ sender: NSSearchField) {
+            parent.text = sender.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            let isEnter =
+                commandSelector == #selector(NSResponder.insertNewline(_:))
+                || commandSelector == #selector(NSResponder.insertLineBreak(_:))
+            guard isEnter else { return false }
+
+            let modifiers = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
+            if modifiers.contains(.shift) {
+                NotificationCenter.default.post(name: .pdfSearchPrevious, object: nil)
+            } else {
+                NotificationCenter.default.post(name: .pdfSearchNext, object: nil)
+            }
+            return true
         }
     }
 }

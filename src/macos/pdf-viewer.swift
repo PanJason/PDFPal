@@ -12,16 +12,37 @@ enum PDFAnnotationAction: String {
     case strikeOut
 }
 
+enum PDFSearchMode: String, CaseIterable, Identifiable {
+    case anyMatch
+    case exactPhrase
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .anyMatch:
+            return "Any Match"
+        case .exactPhrase:
+            return "Exact Phrase"
+        }
+    }
+}
+
 extension Notification.Name {
     static let pdfSetAnnotationAction = Notification.Name("PDFSetAnnotationAction")
     static let pdfHighlighterPrimaryAction = Notification.Name("PDFHighlighterPrimaryAction")
     static let pdfHighlighterModeChanged = Notification.Name("PDFHighlighterModeChanged")
     static let pdfSaveDocument = Notification.Name("PDFSaveDocument")
+    static let pdfFocusSearch = Notification.Name("PDFFocusSearch")
+    static let pdfSearchNext = Notification.Name("PDFSearchNext")
+    static let pdfSearchPrevious = Notification.Name("PDFSearchPrevious")
 }
 
 struct PDFViewer: View {
     let fileURL: URL?
     let onAskLLM: (String) -> Void
+    let searchQuery: String
+    let searchMode: PDFSearchMode
 
     @State private var document: PDFDocument? = nil
     @State private var loadErrorMessage: String? = nil
@@ -29,7 +50,12 @@ struct PDFViewer: View {
     var body: some View {
         ZStack {
             if let document = document {
-                PDFKitContainer(document: document, onAskLLM: onAskLLM)
+                PDFKitContainer(
+                    document: document,
+                    onAskLLM: onAskLLM,
+                    searchQuery: searchQuery,
+                    searchMode: searchMode
+                )
                     .id(document.documentURL?.path ?? UUID().uuidString)
             } else if let errorMessage = loadErrorMessage {
                 PDFEmptyState(
@@ -71,6 +97,8 @@ struct PDFViewer: View {
 struct PDFKitContainer: NSViewRepresentable {
     let document: PDFDocument
     let onAskLLM: (String) -> Void
+    let searchQuery: String
+    let searchMode: PDFSearchMode
 
     func makeNSView(context: Context) -> PDFKitView {
         let pdfView = PDFKitView()
@@ -79,12 +107,14 @@ struct PDFKitContainer: NSViewRepresentable {
         pdfView.displayDirection = .vertical
         pdfView.document = document
         pdfView.onAskLLM = onAskLLM
+        pdfView.updateSearch(query: searchQuery, mode: searchMode)
         return pdfView
     }
 
     func updateNSView(_ pdfView: PDFKitView, context: Context) {
         pdfView.document = document
         pdfView.onAskLLM = onAskLLM
+        pdfView.updateSearch(query: searchQuery, mode: searchMode)
     }
 }
 
@@ -100,17 +130,23 @@ final class PDFKitView: PDFView {
     private var highlighterPrimaryObserver: NSObjectProtocol?
     private var selectionChangedObserver: NSObjectProtocol?
     private var saveObserver: NSObjectProtocol?
+    private var searchNextObserver: NSObjectProtocol?
+    private var searchPreviousObserver: NSObjectProtocol?
     private var pendingModeApplyWorkItem: DispatchWorkItem?
     private var currentAnnotationAction: PDFAnnotationAction = .highlightYellow
     private var isHighlighterModeEnabled = false
     private var isApplyingFromMode = false
     private var lastModeSelectionFingerprint: String?
+    private var lastSearchSignature: String = ""
+    private var searchMatches: [PDFSelection] = []
+    private var currentSearchMatchIndex: Int?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         registerAnnotationObserver()
         registerSelectionObserver()
         registerSaveObserver()
+        registerSearchNavigationObservers()
     }
 
     required init?(coder: NSCoder) {
@@ -118,6 +154,7 @@ final class PDFKitView: PDFView {
         registerAnnotationObserver()
         registerSelectionObserver()
         registerSaveObserver()
+        registerSearchNavigationObservers()
     }
 
     deinit {
@@ -134,10 +171,214 @@ final class PDFKitView: PDFView {
         if let saveObserver {
             NotificationCenter.default.removeObserver(saveObserver)
         }
+        if let searchNextObserver {
+            NotificationCenter.default.removeObserver(searchNextObserver)
+        }
+        if let searchPreviousObserver {
+            NotificationCenter.default.removeObserver(searchPreviousObserver)
+        }
     }
 
     override func setCurrentSelection(_ selection: PDFSelection?, animate: Bool) {
         super.setCurrentSelection(selection, animate: animate)
+    }
+
+    func updateSearch(query: String, mode: PDFSearchMode) {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let documentIdentity = document.map { String(describing: Unmanaged.passUnretained($0).toOpaque()) } ?? "nil"
+        let signature = "\(documentIdentity)|\(mode.rawValue)|\(normalized)"
+        guard signature != lastSearchSignature else { return }
+        lastSearchSignature = signature
+
+        guard !normalized.isEmpty else {
+            highlightedSelections = nil
+            setCurrentSelection(nil, animate: false)
+            searchMatches = []
+            currentSearchMatchIndex = nil
+            return
+        }
+
+        let matches = searchSelections(query: normalized, mode: mode)
+        guard !matches.isEmpty else {
+            highlightedSelections = nil
+            setCurrentSelection(nil, animate: false)
+            searchMatches = []
+            currentSearchMatchIndex = nil
+            return
+        }
+
+        searchMatches = matches
+
+        let highlightedMatches = matches.map { selection -> PDFSelection in
+            let displaySelection = (selection.copy() as? PDFSelection) ?? selection
+            displaySelection.color = NSColor.systemYellow.withAlphaComponent(0.45)
+            return displaySelection
+        }
+        highlightedSelections = highlightedMatches
+
+        let focusedIndex = nearestSearchMatchIndex(in: matches) ?? 0
+        currentSearchMatchIndex = focusedIndex
+        focusSearchMatch(at: focusedIndex, animate: true)
+    }
+
+    private struct SearchSelectionKey: Hashable {
+        let pageIndex: Int
+        let x: Int
+        let y: Int
+        let width: Int
+        let height: Int
+        let text: String
+    }
+
+    private func searchSelections(query: String, mode: PDFSearchMode) -> [PDFSelection] {
+        guard let document else { return [] }
+        let options: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+
+        switch mode {
+        case .exactPhrase:
+            return document.findString(query, withOptions: options)
+        case .anyMatch:
+            let terms = query
+                .split(whereSeparator: { $0.isWhitespace })
+                .map(String.init)
+                .filter { !$0.isEmpty }
+            guard !terms.isEmpty else { return [] }
+
+            var seen = Set<SearchSelectionKey>()
+            var unique: [PDFSelection] = []
+
+            for term in terms {
+                let matches = document.findString(term, withOptions: options)
+                for match in matches {
+                    guard let key = searchSelectionKey(for: match, in: document) else { continue }
+                    if seen.insert(key).inserted {
+                        unique.append(match)
+                    }
+                }
+            }
+
+            unique.sort { lhs, rhs in
+                compareSearchSelections(lhs, rhs, in: document)
+            }
+            return unique
+        }
+    }
+
+    private func searchSelectionKey(for selection: PDFSelection, in document: PDFDocument) -> SearchSelectionKey? {
+        guard let page = selection.pages.first else { return nil }
+        let pageIndex = document.index(for: page)
+        let bounds = selection.bounds(for: page)
+        return SearchSelectionKey(
+            pageIndex: pageIndex,
+            x: Int((bounds.origin.x * 10).rounded()),
+            y: Int((bounds.origin.y * 10).rounded()),
+            width: Int((bounds.width * 10).rounded()),
+            height: Int((bounds.height * 10).rounded()),
+            text: selection.string ?? ""
+        )
+    }
+
+    private func compareSearchSelections(_ lhs: PDFSelection, _ rhs: PDFSelection, in document: PDFDocument) -> Bool {
+        guard let lhsPage = lhs.pages.first, let rhsPage = rhs.pages.first else {
+            return lhs.pages.count < rhs.pages.count
+        }
+        let lhsPageIndex = document.index(for: lhsPage)
+        let rhsPageIndex = document.index(for: rhsPage)
+        if lhsPageIndex != rhsPageIndex {
+            return lhsPageIndex < rhsPageIndex
+        }
+
+        let lhsBounds = lhs.bounds(for: lhsPage)
+        let rhsBounds = rhs.bounds(for: rhsPage)
+        if abs(lhsBounds.minY - rhsBounds.minY) > 0.1 {
+            return lhsBounds.minY > rhsBounds.minY
+        }
+        return lhsBounds.minX < rhsBounds.minX
+    }
+
+    private struct SearchCandidate {
+        let index: Int
+        let pageIndex: Int
+        let pageDistance: Int
+        let localDistance: CGFloat
+        let bounds: CGRect
+    }
+
+    private func nearestSearchMatchIndex(in matches: [PDFSelection]) -> Int? {
+        guard let document else { return matches.isEmpty ? nil : 0 }
+
+        let currentPageIndex: Int = {
+            guard let page = currentPage else { return 0 }
+            return document.index(for: page)
+        }()
+
+        let anchorPoint: CGPoint? = {
+            guard let destination = currentDestination else { return nil }
+            return destination.point
+        }()
+
+        let candidates: [SearchCandidate] = matches.enumerated().compactMap { index, selection in
+            guard let page = selection.pages.first else { return nil }
+            let pageIndex = document.index(for: page)
+            let bounds = selection.bounds(for: page)
+            let pageDistance = abs(pageIndex - currentPageIndex)
+
+            let localDistance: CGFloat
+            if pageDistance == 0, let anchorPoint {
+                let center = CGPoint(x: bounds.midX, y: bounds.midY)
+                localDistance = hypot(center.x - anchorPoint.x, center.y - anchorPoint.y)
+            } else {
+                localDistance = .greatestFiniteMagnitude
+            }
+
+            return SearchCandidate(
+                index: index,
+                pageIndex: pageIndex,
+                pageDistance: pageDistance,
+                localDistance: localDistance,
+                bounds: bounds
+            )
+        }
+
+        guard !candidates.isEmpty else { return matches.isEmpty ? nil : 0 }
+
+        let best = candidates.min { lhs, rhs in
+            if lhs.pageDistance != rhs.pageDistance {
+                return lhs.pageDistance < rhs.pageDistance
+            }
+            if abs(lhs.localDistance - rhs.localDistance) > 0.1 {
+                return lhs.localDistance < rhs.localDistance
+            }
+            if lhs.pageIndex != rhs.pageIndex {
+                return lhs.pageIndex < rhs.pageIndex
+            }
+            if abs(lhs.bounds.minY - rhs.bounds.minY) > 0.1 {
+                return lhs.bounds.minY > rhs.bounds.minY
+            }
+            return lhs.bounds.minX < rhs.bounds.minX
+        }
+
+        return best?.index
+    }
+
+    private func focusSearchMatch(at index: Int, animate: Bool) {
+        guard searchMatches.indices.contains(index) else { return }
+        let selection = searchMatches[index]
+        setCurrentSelection(selection, animate: animate)
+        go(to: selection)
+    }
+
+    private func navigateSearchMatch(step: Int) {
+        guard !searchMatches.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        let count = searchMatches.count
+        let baseIndex = currentSearchMatchIndex ?? nearestSearchMatchIndex(in: searchMatches) ?? 0
+        let nextIndex = (baseIndex + step + count) % count
+        currentSearchMatchIndex = nextIndex
+        focusSearchMatch(at: nextIndex, animate: true)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -598,6 +839,24 @@ final class PDFKitView: PDFView {
             queue: .main
         ) { [weak self] _ in
             self?.saveCurrentDocument()
+        }
+    }
+
+    private func registerSearchNavigationObservers() {
+        searchNextObserver = NotificationCenter.default.addObserver(
+            forName: .pdfSearchNext,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.navigateSearchMatch(step: 1)
+        }
+
+        searchPreviousObserver = NotificationCenter.default.addObserver(
+            forName: .pdfSearchPrevious,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.navigateSearchMatch(step: -1)
         }
     }
 
