@@ -11,6 +11,8 @@ also includes a view menu that toggles the chat panel and session sidebar. The
 app delegate also applies the app icon at launch using the bundled
 `app_icon.png` asset with a SwiftPM fallback for development. A `File > Save`
 menu action (`Cmd+S`) is wired to save the current PDF with annotation changes.
+The toolbar also includes a PDF search field with mode switching (`Any Match`
+or `Exact Phrase`) and supports `Cmd+F` to focus the search field.
 
 ## Public API
 ```swift
@@ -73,6 +75,8 @@ struct GeminiLLMChatServing: View {}
 - `AppShellView` owns `@State` properties for file selection, chat visibility,
   selection text, provider selection, and error presentation, plus
   `@StateObject` session stores for each provider.
+- `AppShellView` also owns `searchQuery` and `searchMode` state, and a search
+  focus request token used by `Cmd+F` to focus the toolbar search field.
 - `selectionText` is updated when `PDFViewer` invokes the Ask LLM callback.
 - Ask LLM only updates context on the active session when it matches the
   current PDF; otherwise it creates a session only if a provider key exists.
@@ -94,6 +98,12 @@ struct GeminiLLMChatServing: View {}
   `Notification.Name.pdfApplyAnnotation` and applied by `PDFKitView`.
 - File menu save action posts `Notification.Name.pdfSaveDocument`, handled by
   `PDFKitView` to persist the current `PDFDocument` to its source URL.
+- `Cmd+F` posts `Notification.Name.pdfFocusSearch`; `AppShellView` handles it
+  by focusing the toolbar search field.
+- The search field maps `Enter` to `pdfSearchNext` and `Shift+Enter` to
+  `pdfSearchPrevious`.
+- Search query and mode are passed into `PDFViewer`, where `PDFKitView`
+  executes the document search.
 
 ## Usage Examples
 ```swift

@@ -18,9 +18,19 @@ annotations can also be removed, and existing notes can be removed directly.
 enum PDFAnnotationAction {}
 
 /**
+ * PDFSearchMode - Search matching mode for PDF text search
+ *
+ * anyMatch splits query into terms and finds results for any term.
+ * exactPhrase finds literal phrase matches for the full query.
+ */
+enum PDFSearchMode {}
+
+/**
  * PDFViewer - SwiftUI wrapper for PDFKit rendering
  * @fileURL: Optional file URL for the PDF to display
  * @onAskLLM: Callback invoked when the user selects Ask LLM from the context menu
+ * @searchQuery: Current toolbar query text
+ * @searchMode: Current toolbar search mode
  *
  * Displays a PDF with auto-scaling, shows empty/error states, and routes the
  * current selection to the app shell when Ask LLM is chosen.
@@ -38,6 +48,8 @@ struct PDFViewer: View {}
  * PDFKitContainer - NSViewRepresentable wrapper around PDFKitView
  * @document: PDFDocument instance to render
  * @onAskLLM: Callback invoked for Ask LLM menu action
+ * @searchQuery: Query string to search in the loaded document
+ * @searchMode: Match mode for the query
  */
 struct PDFKitContainer: NSViewRepresentable {}
 
@@ -50,6 +62,7 @@ struct PDFKitContainer: NSViewRepresentable {}
  * - "Remove Highlight/Underline/Strikethrough" on annotation right-click
  * - "Add/Edit Note..." and "Remove Note" on annotation right-click
  * - "Ask LLM" on current text selection
+ * - toolbar-driven PDF search for Any Match and Exact Phrase
  */
 final class PDFKitView: PDFView {}
 
@@ -70,6 +83,8 @@ struct PDFEmptyState: View {}
   `Notification.Name.pdfApplyAnnotation`.
 - `PDFKitView` listens for `Notification.Name.pdfSaveDocument` and writes the
   current document back to `documentURL`.
+- `PDFKitView` caches the last search signature and re-runs search only when
+  document/query/mode change.
 
 ## Integration Points
 - The `onAskLLM` callback is wired to `AppShellView` to open the chat panel.
@@ -78,6 +93,17 @@ struct PDFEmptyState: View {}
   active PDF view applies to the current selection.
 - File menu save (`Cmd+S`) posts `pdfSaveDocument`; the PDF view persists all
   annotation and note edits to disk.
+- App shell search state (`searchQuery`, `searchMode`) is passed to
+  `PDFKitView`, which executes synchronous document search via PDFKit.
+- Search mode behavior:
+  - `Any Match`: query is tokenized by whitespace and matches any token.
+  - `Exact Phrase`: query is matched as one phrase.
+- All matched search results are highlighted in yellow.
+- Initial search focus jumps to the nearest match to the currently visible page
+  (and current viewport anchor on that page).
+- Search navigation behavior:
+  - `Enter`: move focus to next match.
+  - `Shift+Enter`: move focus to previous match.
 
 ## Context Menu Markup Picker
 - The annotation context menu keeps a compact first-row markup picker for
