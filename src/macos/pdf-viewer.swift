@@ -188,6 +188,7 @@ final class PDFReaderContainerView: NSView {
     private var sidebarFrameObserver: NSObjectProtocol?
     private var thumbnailWarmupWorkItem: DispatchWorkItem?
     private var thumbnailWarmupAttemptsRemaining: Int = 0
+    private var hasBoundThumbnailView = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -216,6 +217,7 @@ final class PDFReaderContainerView: NSView {
         let documentChanged = pdfView.document !== document
         if documentChanged {
             pdfView.document = document
+            hasBoundThumbnailView = false
         }
 
         pdfView.onAskLLM = onAskLLM
@@ -240,7 +242,7 @@ final class PDFReaderContainerView: NSView {
             guard let self, self.currentSidebarMode != .hidden else { return }
             self.enforceMinimumSidebarWidthIfNeeded()
             if self.currentSidebarMode == .thumbnails {
-                self.refreshThumbnailView()
+                self.refreshThumbnailViewIfReady(forceRebind: true)
             }
         }
     }
@@ -255,7 +257,7 @@ final class PDFReaderContainerView: NSView {
         splitView.onSubviewsResized = { [weak self] in
             guard let self else { return }
             if self.currentSidebarMode == .thumbnails {
-                self.updateThumbnailSizeToSidebarWidth()
+                self.refreshThumbnailViewIfReady()
             }
         }
         addSubview(splitView)
@@ -289,7 +291,7 @@ final class PDFReaderContainerView: NSView {
         ) { [weak self] _ in
             guard let self else { return }
             if self.currentSidebarMode == .thumbnails {
-                self.updateThumbnailSizeToSidebarWidth()
+                self.refreshThumbnailViewIfReady()
             }
         }
 
@@ -297,7 +299,7 @@ final class PDFReaderContainerView: NSView {
             guard let self else { return }
             self.splitView.setPosition(self.sidebarWidth, ofDividerAt: 0)
             if self.currentSidebarMode == .thumbnails {
-                self.refreshThumbnailView()
+                self.refreshThumbnailViewIfReady(forceRebind: true)
             }
         }
     }
@@ -311,6 +313,7 @@ final class PDFReaderContainerView: NSView {
             splitView.minimumLeadingWidth = 0
             sidebarContainer.subviews.forEach { $0.removeFromSuperview() }
             sidebarContainer.isHidden = true
+            hasBoundThumbnailView = false
             splitView.setPosition(0, ofDividerAt: 0)
             return
         }
@@ -322,9 +325,8 @@ final class PDFReaderContainerView: NSView {
         sidebarContainer.subviews.forEach { $0.removeFromSuperview() }
 
         if mode == .thumbnails {
-            // Known bug: PDFThumbnailView startup/render behavior is unstable on
-            // some systems; this path uses repeated refresh attempts as a workaround.
-            thumbnailView.pdfView = pdfView
+            hasBoundThumbnailView = false
+            thumbnailView.pdfView = nil
             sidebarContainer.addSubview(thumbnailView)
             NSLayoutConstraint.activate([
                 thumbnailView.leadingAnchor.constraint(equalTo: sidebarContainer.leadingAnchor),
@@ -333,12 +335,11 @@ final class PDFReaderContainerView: NSView {
                 thumbnailView.bottomAnchor.constraint(equalTo: sidebarContainer.bottomAnchor),
             ])
             sidebarContainer.layoutSubtreeIfNeeded()
-            refreshThumbnailView()
             startThumbnailWarmup()
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 if self.currentSidebarMode == .thumbnails {
-                    self.refreshThumbnailView()
+                    self.refreshThumbnailViewIfReady(forceRebind: true)
                 }
             }
             return
@@ -469,14 +470,24 @@ final class PDFReaderContainerView: NSView {
     override func layout() {
         super.layout()
         if currentSidebarMode == .thumbnails {
-            updateThumbnailSizeToSidebarWidth()
+            refreshThumbnailViewIfReady()
         }
     }
 
-    private func updateThumbnailSizeToSidebarWidth() {
-        let measuredWidth = max(thumbnailView.bounds.width, sidebarContainer.bounds.width)
-        guard measuredWidth > 1 else { return }
-        let availableWidth = measuredWidth
+    private func resolvedThumbnailSidebarWidth() -> CGFloat? {
+        guard window != nil else { return nil }
+        guard splitView.subviews.count >= 2 else { return nil }
+
+        let sidebarFrameWidth = splitView.subviews[0].frame.width
+        let sidebarHeight = sidebarContainer.bounds.height
+        guard sidebarFrameWidth > 1, sidebarHeight > 1 else { return nil }
+
+        return sidebarFrameWidth
+    }
+
+    @discardableResult
+    private func updateThumbnailSizeToSidebarWidth() -> Bool {
+        guard let availableWidth = resolvedThumbnailSidebarWidth() else { return false }
 
         let horizontalPadding: CGFloat = 8
         let thumbnailWidth = max(90, availableWidth - horizontalPadding)
@@ -502,17 +513,28 @@ final class PDFReaderContainerView: NSView {
         if thumbnailView.thumbnailSize != size {
             thumbnailView.thumbnailSize = size
             thumbnailView.layoutSubtreeIfNeeded()
+            return true
         }
+        return false
     }
 
-    private func refreshThumbnailView() {
-        updateThumbnailSizeToSidebarWidth()
-        // Known bug workaround: rebinding after layout attachment can force
-        // thumbnail list materialization when PDFKit initially renders blank.
-        thumbnailView.pdfView = nil
-        thumbnailView.pdfView = pdfView
-        thumbnailView.needsLayout = true
-        thumbnailView.needsDisplay = true
+    private func refreshThumbnailViewIfReady(forceRebind: Bool = false) {
+        guard currentSidebarMode == .thumbnails else { return }
+        let sizeDidChange = updateThumbnailSizeToSidebarWidth()
+        guard resolvedThumbnailSidebarWidth() != nil else { return }
+
+        // Bind after the sidebar has a real post-attach size. Rebinding on every
+        // warmup tick was racing PDFThumbnailView against unstable startup layout.
+        if forceRebind || !hasBoundThumbnailView {
+            thumbnailView.pdfView = nil
+            thumbnailView.pdfView = pdfView
+            hasBoundThumbnailView = true
+        }
+
+        if forceRebind || sizeDidChange {
+            thumbnailView.needsLayout = true
+            thumbnailView.needsDisplay = true
+        }
     }
 
     private func startThumbnailWarmup() {
@@ -536,10 +558,8 @@ final class PDFReaderContainerView: NSView {
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.currentSidebarMode == .thumbnails else { return }
-            // Enforce sidebar width on each tick in case NSSplitView autosave
-            // restored a too-narrow position before our mode update finished.
             self.enforceMinimumSidebarWidthIfNeeded()
-            self.refreshThumbnailView()
+            self.refreshThumbnailViewIfReady()
             self.thumbnailWarmupAttemptsRemaining -= 1
             self.scheduleThumbnailWarmupTick()
         }
