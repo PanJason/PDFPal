@@ -30,8 +30,6 @@ enum PDFSearchMode: String, CaseIterable, Identifiable {
 
 enum PDFSidebarMode: String, CaseIterable, Identifiable {
     case hidden
-    // Known bug: on some machines PDFThumbnailView may not render immediately
-    // at startup until the sidebar width is adjusted.
     case thumbnails
     case tableOfContents
     case highlightsAndNotes
@@ -44,7 +42,7 @@ enum PDFSidebarMode: String, CaseIterable, Identifiable {
         case .hidden:
             return "Hide Sidebar"
         case .thumbnails:
-            return "Thumbnails (BUGGY)"
+            return "Thumbnails"
         case .tableOfContents:
             return "Table of contents"
         case .highlightsAndNotes:
