@@ -188,7 +188,9 @@ final class PDFReaderContainerView: NSView {
     private var sidebarFrameObserver: NSObjectProtocol?
     private var thumbnailWarmupWorkItem: DispatchWorkItem?
     private var thumbnailWarmupAttemptsRemaining: Int = 0
+    private var thumbnailRefreshWorkItem: DispatchWorkItem?
     private var hasBoundThumbnailView = false
+    private let thumbnailResizeSettleDelay: TimeInterval = 0.18
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -205,6 +207,7 @@ final class PDFReaderContainerView: NSView {
             NotificationCenter.default.removeObserver(sidebarFrameObserver)
         }
         thumbnailWarmupWorkItem?.cancel()
+        thumbnailRefreshWorkItem?.cancel()
     }
 
     func update(
@@ -257,7 +260,7 @@ final class PDFReaderContainerView: NSView {
         splitView.onSubviewsResized = { [weak self] in
             guard let self else { return }
             if self.currentSidebarMode == .thumbnails {
-                self.refreshThumbnailViewIfReady()
+                self.scheduleThumbnailRefreshAfterResizeSettles()
             }
         }
         addSubview(splitView)
@@ -291,7 +294,7 @@ final class PDFReaderContainerView: NSView {
         ) { [weak self] _ in
             guard let self else { return }
             if self.currentSidebarMode == .thumbnails {
-                self.refreshThumbnailViewIfReady()
+                self.scheduleThumbnailRefreshAfterResizeSettles()
             }
         }
 
@@ -470,7 +473,7 @@ final class PDFReaderContainerView: NSView {
     override func layout() {
         super.layout()
         if currentSidebarMode == .thumbnails {
-            refreshThumbnailViewIfReady()
+            scheduleThumbnailRefreshAfterResizeSettles()
         }
     }
 
@@ -537,6 +540,36 @@ final class PDFReaderContainerView: NSView {
         }
     }
 
+    private func scheduleThumbnailRefresh(forceRebind: Bool = false) {
+        guard currentSidebarMode == .thumbnails else { return }
+        thumbnailRefreshWorkItem?.cancel()
+        thumbnailRefreshWorkItem = nil
+        refreshThumbnailViewIfReady(forceRebind: forceRebind)
+    }
+
+    private func scheduleThumbnailRefreshAfterResizeSettles(forceRebind: Bool = false) {
+        guard currentSidebarMode == .thumbnails else { return }
+        let scheduledWidth = splitView.subviews.first?.frame.width ?? 0
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.currentSidebarMode == .thumbnails else { return }
+
+            let currentWidth = self.splitView.subviews.first?.frame.width ?? 0
+            if abs(currentWidth - scheduledWidth) > 0.5 {
+                self.scheduleThumbnailRefreshAfterResizeSettles(forceRebind: forceRebind)
+                return
+            }
+
+            self.thumbnailRefreshWorkItem = nil
+            self.refreshThumbnailViewIfReady(forceRebind: forceRebind)
+        }
+
+        thumbnailRefreshWorkItem?.cancel()
+        thumbnailRefreshWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + thumbnailResizeSettleDelay, execute: workItem)
+    }
+
     private func startThumbnailWarmup() {
         thumbnailWarmupAttemptsRemaining = 8
         scheduleThumbnailWarmupTick()
@@ -559,7 +592,7 @@ final class PDFReaderContainerView: NSView {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.currentSidebarMode == .thumbnails else { return }
             self.enforceMinimumSidebarWidthIfNeeded()
-            self.refreshThumbnailViewIfReady()
+            self.scheduleThumbnailRefresh(forceRebind: !self.hasBoundThumbnailView)
             self.thumbnailWarmupAttemptsRemaining -= 1
             self.scheduleThumbnailWarmupTick()
         }
