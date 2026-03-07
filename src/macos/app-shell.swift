@@ -63,6 +63,7 @@ struct AppShellView: View {
     @State private var selectedProvider: LLMProvider = .openAI
     @State private var selectedAnnotationAction: PDFAnnotationAction = .highlightYellow
     @State private var isHighlighterModeEnabled = false
+    @State private var selectedPDFSidebarMode: PDFSidebarMode = .thumbnails
     @State private var searchQuery = ""
     @State private var searchMode: PDFSearchMode = .exactPhrase
     @State private var keyEventMonitor: Any?
@@ -77,7 +78,8 @@ struct AppShellView: View {
                 fileURL: fileURL,
                 onAskLLM: handleAskLLM,
                 searchQuery: searchQuery,
-                searchMode: searchMode
+                searchMode: searchMode,
+                sidebarMode: selectedPDFSidebarMode
             )
             .frame(minWidth: 360)
 
@@ -166,6 +168,12 @@ struct AppShellView: View {
                     Toggle("Chat Panel", isOn: $isChatVisible)
                     Toggle("Sessions Sidebar", isOn: $isSessionSidebarVisible)
                         .disabled(!isChatVisible)
+                    Divider()
+                    pdfSidebarModeMenuItem(.hidden)
+                    pdfSidebarModeMenuItem(.thumbnails)
+                    pdfSidebarModeMenuItem(.tableOfContents)
+                    pdfSidebarModeMenuItem(.highlightsAndNotes)
+                    pdfSidebarModeMenuItem(.bookmarks)
                 } label: {
                     Image(systemName: "sidebar.squares.left")
                 }
@@ -366,6 +374,19 @@ struct AppShellView: View {
                 selectAnnotationAction(action)
             }
         )
+    }
+
+    @ViewBuilder
+    private func pdfSidebarModeMenuItem(_ mode: PDFSidebarMode) -> some View {
+        Button {
+            selectedPDFSidebarMode = mode
+        } label: {
+            if selectedPDFSidebarMode == mode {
+                Label(mode.title, systemImage: "checkmark")
+            } else {
+                Text(mode.title)
+            }
+        }
     }
 
     private func installFindShortcutMonitorIfNeeded() {

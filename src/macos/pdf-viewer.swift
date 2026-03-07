@@ -28,6 +28,33 @@ enum PDFSearchMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum PDFSidebarMode: String, CaseIterable, Identifiable {
+    case hidden
+    // Known bug: on some machines PDFThumbnailView may not render immediately
+    // at startup until the sidebar width is adjusted.
+    case thumbnails
+    case tableOfContents
+    case highlightsAndNotes
+    case bookmarks
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .hidden:
+            return "Hide Sidebar"
+        case .thumbnails:
+            return "Thumbnails (BUGGY)"
+        case .tableOfContents:
+            return "Table of contents"
+        case .highlightsAndNotes:
+            return "Highlights and Notes"
+        case .bookmarks:
+            return "Bookmarks (TODO)"
+        }
+    }
+}
+
 extension Notification.Name {
     static let pdfSetAnnotationAction = Notification.Name("PDFSetAnnotationAction")
     static let pdfHighlighterPrimaryAction = Notification.Name("PDFHighlighterPrimaryAction")
@@ -43,6 +70,7 @@ struct PDFViewer: View {
     let onAskLLM: (String) -> Void
     let searchQuery: String
     let searchMode: PDFSearchMode
+    let sidebarMode: PDFSidebarMode
 
     @State private var document: PDFDocument? = nil
     @State private var loadErrorMessage: String? = nil
@@ -54,7 +82,8 @@ struct PDFViewer: View {
                     document: document,
                     onAskLLM: onAskLLM,
                     searchQuery: searchQuery,
-                    searchMode: searchMode
+                    searchMode: searchMode,
+                    sidebarMode: sidebarMode
                 )
                     .id(document.documentURL?.path ?? UUID().uuidString)
             } else if let errorMessage = loadErrorMessage {
@@ -99,22 +128,525 @@ struct PDFKitContainer: NSViewRepresentable {
     let onAskLLM: (String) -> Void
     let searchQuery: String
     let searchMode: PDFSearchMode
+    let sidebarMode: PDFSidebarMode
 
-    func makeNSView(context: Context) -> PDFKitView {
-        let pdfView = PDFKitView()
+    func makeNSView(context: Context) -> PDFReaderContainerView {
+        let container = PDFReaderContainerView()
+        container.update(
+            document: document,
+            onAskLLM: onAskLLM,
+            searchQuery: searchQuery,
+            searchMode: searchMode,
+            sidebarMode: sidebarMode
+        )
+        return container
+    }
+
+    func updateNSView(_ container: PDFReaderContainerView, context: Context) {
+        container.update(
+            document: document,
+            onAskLLM: onAskLLM,
+            searchQuery: searchQuery,
+            searchMode: searchMode,
+            sidebarMode: sidebarMode
+        )
+    }
+}
+
+private final class SidebarSplitView: NSSplitView {
+    var onSubviewsResized: (() -> Void)?
+    // When non-zero, the leading subview is prevented from collapsing below this width.
+    // NSSplitView restores autosaved positions inside adjustSubviews, so enforcing here
+    // catches autosave restores that would otherwise collapse the sidebar to 0.
+    var minimumLeadingWidth: CGFloat = 0
+    private var isEnforcingMinimum = false
+
+    override func adjustSubviews() {
+        super.adjustSubviews()
+        if !isEnforcingMinimum,
+           minimumLeadingWidth > 0,
+           subviews.count >= 2,
+           !(subviews[0].isHidden),
+           subviews[0].frame.width < minimumLeadingWidth {
+            isEnforcingMinimum = true
+            setPosition(minimumLeadingWidth, ofDividerAt: 0)
+            isEnforcingMinimum = false
+        }
+        onSubviewsResized?()
+    }
+}
+
+final class PDFReaderContainerView: NSView {
+    private let splitView = SidebarSplitView()
+    private let sidebarContainer = NSView()
+    private let pdfView = PDFKitView()
+    private let thumbnailView = PDFThumbnailView()
+
+    private var currentSidebarMode: PDFSidebarMode = .hidden
+    private weak var currentDocument: PDFDocument?
+    private let sidebarWidth: CGFloat = 180
+    private var sidebarFrameObserver: NSObjectProtocol?
+    private var thumbnailWarmupWorkItem: DispatchWorkItem?
+    private var thumbnailWarmupAttemptsRemaining: Int = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupViews()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupViews()
+    }
+
+    deinit {
+        if let sidebarFrameObserver {
+            NotificationCenter.default.removeObserver(sidebarFrameObserver)
+        }
+        thumbnailWarmupWorkItem?.cancel()
+    }
+
+    func update(
+        document: PDFDocument,
+        onAskLLM: @escaping (String) -> Void,
+        searchQuery: String,
+        searchMode: PDFSearchMode,
+        sidebarMode: PDFSidebarMode
+    ) {
+        let documentChanged = pdfView.document !== document
+        if documentChanged {
+            pdfView.document = document
+        }
+
+        pdfView.onAskLLM = onAskLLM
+        pdfView.updateSearch(query: searchQuery, mode: searchMode)
+
+        if documentChanged || sidebarMode != currentSidebarMode {
+            currentDocument = document
+            currentSidebarMode = sidebarMode
+            configureSidebar(mode: sidebarMode, document: document)
+        } else if sidebarMode == .highlightsAndNotes {
+            // Keep this list reasonably fresh while the user interacts with annotations.
+            configureSidebar(mode: sidebarMode, document: document)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        // Defer until after NSSplitView has applied its autosaved divider position,
+        // which can override the setPosition calls made during initial setup.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.currentSidebarMode != .hidden else { return }
+            self.enforceMinimumSidebarWidthIfNeeded()
+            if self.currentSidebarMode == .thumbnails {
+                self.refreshThumbnailView()
+            }
+        }
+    }
+
+    private func setupViews() {
+        wantsLayer = true
+
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.autosaveName = "PDFReaderContainerSplitView"
+        splitView.onSubviewsResized = { [weak self] in
+            guard let self else { return }
+            if self.currentSidebarMode == .thumbnails {
+                self.updateThumbnailSizeToSidebarWidth()
+            }
+        }
+        addSubview(splitView)
+
+        sidebarContainer.translatesAutoresizingMaskIntoConstraints = false
+        sidebarContainer.postsFrameChangedNotifications = true
+        splitView.addSubview(sidebarContainer)
+        splitView.addSubview(pdfView)
+
+        NSLayoutConstraint.activate([
+            splitView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            splitView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            splitView.topAnchor.constraint(equalTo: topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            sidebarContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+        ])
+
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
-        pdfView.document = document
-        pdfView.onAskLLM = onAskLLM
-        pdfView.updateSearch(query: searchQuery, mode: searchMode)
-        return pdfView
+
+        thumbnailView.translatesAutoresizingMaskIntoConstraints = false
+        thumbnailView.maximumNumberOfColumns = 1
+        thumbnailView.backgroundColor = NSColor.windowBackgroundColor
+        thumbnailView.allowsDragging = false
+
+        sidebarFrameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: sidebarContainer,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            if self.currentSidebarMode == .thumbnails {
+                self.updateThumbnailSizeToSidebarWidth()
+            }
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.splitView.setPosition(self.sidebarWidth, ofDividerAt: 0)
+            if self.currentSidebarMode == .thumbnails {
+                self.refreshThumbnailView()
+            }
+        }
     }
 
-    func updateNSView(_ pdfView: PDFKitView, context: Context) {
-        pdfView.document = document
-        pdfView.onAskLLM = onAskLLM
-        pdfView.updateSearch(query: searchQuery, mode: searchMode)
+    private func configureSidebar(mode: PDFSidebarMode, document: PDFDocument) {
+        if mode != .thumbnails {
+            stopThumbnailWarmup()
+        }
+
+        if mode == .hidden {
+            splitView.minimumLeadingWidth = 0
+            sidebarContainer.subviews.forEach { $0.removeFromSuperview() }
+            sidebarContainer.isHidden = true
+            splitView.setPosition(0, ofDividerAt: 0)
+            return
+        }
+
+        splitView.minimumLeadingWidth = sidebarWidth
+        sidebarContainer.isHidden = false
+        enforceMinimumSidebarWidthIfNeeded()
+
+        sidebarContainer.subviews.forEach { $0.removeFromSuperview() }
+
+        if mode == .thumbnails {
+            // Known bug: PDFThumbnailView startup/render behavior is unstable on
+            // some systems; this path uses repeated refresh attempts as a workaround.
+            thumbnailView.pdfView = pdfView
+            sidebarContainer.addSubview(thumbnailView)
+            NSLayoutConstraint.activate([
+                thumbnailView.leadingAnchor.constraint(equalTo: sidebarContainer.leadingAnchor),
+                thumbnailView.trailingAnchor.constraint(equalTo: sidebarContainer.trailingAnchor),
+                thumbnailView.topAnchor.constraint(equalTo: sidebarContainer.topAnchor),
+                thumbnailView.bottomAnchor.constraint(equalTo: sidebarContainer.bottomAnchor),
+            ])
+            sidebarContainer.layoutSubtreeIfNeeded()
+            refreshThumbnailView()
+            startThumbnailWarmup()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.currentSidebarMode == .thumbnails {
+                    self.refreshThumbnailView()
+                }
+            }
+            return
+        }
+
+        let outlineItems: [PDFOutlineSidebarItem] = {
+            if mode == .tableOfContents {
+                return flattenOutlineItems(from: document.outlineRoot)
+            }
+            return []
+        }()
+        let annotationItems = collectHighlightAndNoteItems(from: document)
+        let hosting = NSHostingView(
+            rootView: PDFDocumentSidebarContentView(
+                mode: mode,
+                outlineItems: outlineItems,
+                annotationItems: annotationItems,
+                onSelectOutline: { [weak self] item in
+                    self?.navigateToOutlineItem(item)
+                },
+                onSelectAnnotation: { [weak self] item in
+                    self?.navigateToAnnotationItem(item)
+                }
+            )
+        )
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        sidebarContainer.addSubview(hosting)
+
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: sidebarContainer.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: sidebarContainer.trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: sidebarContainer.topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: sidebarContainer.bottomAnchor),
+        ])
+    }
+
+    private func flattenOutlineItems(from root: PDFOutline?) -> [PDFOutlineSidebarItem] {
+        guard let root else { return [] }
+        var result: [PDFOutlineSidebarItem] = []
+
+        func visit(_ node: PDFOutline, level: Int) {
+            let children = Int(node.numberOfChildren)
+            for childIndex in 0..<children {
+                guard let child = node.child(at: childIndex) else { continue }
+                let title = child.label?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleanedTitle = (title?.isEmpty == false ? title! : "Untitled")
+                let page = child.destination?.page
+                let pageNumber = page.flatMap { page in
+                    child.document.map { $0.index(for: page) + 1 }
+                }
+                result.append(
+                    PDFOutlineSidebarItem(
+                        id: "\(level)-\(childIndex)-\(cleanedTitle)-\(pageNumber ?? -1)",
+                        title: cleanedTitle,
+                        level: level,
+                        destination: child.destination,
+                        page: page,
+                        pageNumber: pageNumber
+                    )
+                )
+                visit(child, level: level + 1)
+            }
+        }
+
+        visit(root, level: 0)
+        return result
+    }
+
+    private func collectHighlightAndNoteItems(from document: PDFDocument) -> [PDFAnnotationSidebarItem] {
+        var items: [PDFAnnotationSidebarItem] = []
+
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index) else { continue }
+            for annotation in page.annotations {
+                let typeName = (annotation.type ?? "").lowercased()
+                let isMarkup = typeName.contains("highlight")
+                    || typeName.contains("underline")
+                    || typeName.contains("strike")
+                let isNote = typeName.contains("text")
+
+                guard isMarkup || isNote else { continue }
+
+                let kind: String = {
+                    if typeName.contains("highlight") { return "Highlight" }
+                    if typeName.contains("underline") { return "Underline" }
+                    if typeName.contains("strike") { return "Strikethrough" }
+                    return "Note"
+                }()
+
+                let rawText = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let summary = rawText.isEmpty ? "\(kind) on page \(index + 1)" : rawText
+                let subtitle = "Page \(index + 1)"
+
+                items.append(
+                    PDFAnnotationSidebarItem(
+                        id: "\(index)-\(kind)-\(annotation.bounds.origin.x)-\(annotation.bounds.origin.y)",
+                        title: summary,
+                        subtitle: subtitle,
+                        page: page,
+                        annotation: annotation
+                    )
+                )
+            }
+        }
+        return items
+    }
+
+    private func navigateToOutlineItem(_ item: PDFOutlineSidebarItem) {
+        if let destination = item.destination {
+            pdfView.go(to: destination)
+            return
+        }
+        if let page = item.page {
+            pdfView.go(to: page)
+        }
+    }
+
+    private func navigateToAnnotationItem(_ item: PDFAnnotationSidebarItem) {
+        if let annotation = item.annotation {
+            let point = CGPoint(x: annotation.bounds.minX, y: annotation.bounds.maxY)
+            let destination = PDFDestination(page: item.page, at: point)
+            pdfView.go(to: destination)
+            return
+        }
+        pdfView.go(to: item.page)
+    }
+
+    override func layout() {
+        super.layout()
+        if currentSidebarMode == .thumbnails {
+            updateThumbnailSizeToSidebarWidth()
+        }
+    }
+
+    private func updateThumbnailSizeToSidebarWidth() {
+        let measuredWidth = max(thumbnailView.bounds.width, sidebarContainer.bounds.width)
+        guard measuredWidth > 1 else { return }
+        let availableWidth = measuredWidth
+
+        let horizontalPadding: CGFloat = 8
+        let thumbnailWidth = max(90, availableWidth - horizontalPadding)
+        let defaultAspectRatio: CGFloat = 1.30
+        let rawAspectRatio: CGFloat = {
+            guard
+                let document = currentDocument,
+                let firstPage = document.page(at: 0)
+            else {
+                return defaultAspectRatio
+            }
+
+            let pageBounds = firstPage.bounds(for: .mediaBox)
+            guard pageBounds.width > 0 else {
+                return defaultAspectRatio
+            }
+            return max(1.0, pageBounds.height / pageBounds.width)
+        }()
+        // Keep thumbnail cards visually tight like Preview and avoid extremely tall cells.
+        let aspectRatio = min(rawAspectRatio, 1.35)
+        let thumbnailHeight = thumbnailWidth * aspectRatio
+        let size = NSSize(width: thumbnailWidth, height: thumbnailHeight)
+        if thumbnailView.thumbnailSize != size {
+            thumbnailView.thumbnailSize = size
+            thumbnailView.layoutSubtreeIfNeeded()
+        }
+    }
+
+    private func refreshThumbnailView() {
+        updateThumbnailSizeToSidebarWidth()
+        // Known bug workaround: rebinding after layout attachment can force
+        // thumbnail list materialization when PDFKit initially renders blank.
+        thumbnailView.pdfView = nil
+        thumbnailView.pdfView = pdfView
+        thumbnailView.needsLayout = true
+        thumbnailView.needsDisplay = true
+    }
+
+    private func startThumbnailWarmup() {
+        thumbnailWarmupAttemptsRemaining = 8
+        scheduleThumbnailWarmupTick()
+    }
+
+    private func stopThumbnailWarmup() {
+        thumbnailWarmupWorkItem?.cancel()
+        thumbnailWarmupWorkItem = nil
+        thumbnailWarmupAttemptsRemaining = 0
+    }
+
+    private func scheduleThumbnailWarmupTick() {
+        thumbnailWarmupWorkItem?.cancel()
+
+        guard thumbnailWarmupAttemptsRemaining > 0 else {
+            thumbnailWarmupWorkItem = nil
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.currentSidebarMode == .thumbnails else { return }
+            // Enforce sidebar width on each tick in case NSSplitView autosave
+            // restored a too-narrow position before our mode update finished.
+            self.enforceMinimumSidebarWidthIfNeeded()
+            self.refreshThumbnailView()
+            self.thumbnailWarmupAttemptsRemaining -= 1
+            self.scheduleThumbnailWarmupTick()
+        }
+        thumbnailWarmupWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
+    }
+
+    private func enforceMinimumSidebarWidthIfNeeded() {
+        guard splitView.subviews.count >= 2, !sidebarContainer.isHidden else { return }
+        if splitView.subviews[0].frame.width < sidebarWidth {
+            splitView.setPosition(sidebarWidth, ofDividerAt: 0)
+        }
+    }
+}
+
+private struct PDFOutlineSidebarItem: Identifiable {
+    let id: String
+    let title: String
+    let level: Int
+    let destination: PDFDestination?
+    let page: PDFPage?
+    let pageNumber: Int?
+}
+
+private struct PDFAnnotationSidebarItem: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let page: PDFPage
+    let annotation: PDFAnnotation?
+}
+
+private struct PDFDocumentSidebarContentView: View {
+    let mode: PDFSidebarMode
+    let outlineItems: [PDFOutlineSidebarItem]
+    let annotationItems: [PDFAnnotationSidebarItem]
+    let onSelectOutline: (PDFOutlineSidebarItem) -> Void
+    let onSelectAnnotation: (PDFAnnotationSidebarItem) -> Void
+
+    var body: some View {
+        switch mode {
+        case .tableOfContents:
+            if outlineItems.isEmpty {
+                sidebarEmptyState(title: mode.title, message: "No entries available.")
+            } else {
+                List(outlineItems) { item in
+                    Button {
+                        onSelectOutline(item)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(item.title)
+                                .lineLimit(2)
+                            Spacer(minLength: 8)
+                            if let pageNumber = item.pageNumber {
+                                Text("\(pageNumber)")
+                                    .foregroundColor(.secondary)
+                                    .font(.caption)
+                            }
+                        }
+                        .padding(.leading, CGFloat(item.level) * 12.0)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listStyle(.sidebar)
+            }
+        case .bookmarks:
+            sidebarEmptyState(
+                title: mode.title,
+                message: "TODO: Bookmarks sidebar is not implemented yet."
+            )
+        case .highlightsAndNotes:
+            if annotationItems.isEmpty {
+                sidebarEmptyState(title: mode.title, message: "No highlights or notes found.")
+            } else {
+                List(annotationItems) { item in
+                    Button {
+                        onSelectAnnotation(item)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title)
+                                .lineLimit(2)
+                                .foregroundColor(.primary)
+                            Text(item.subtitle)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listStyle(.sidebar)
+            }
+        case .hidden, .thumbnails:
+            EmptyView()
+        }
+    }
+
+    private func sidebarEmptyState(title: String, message: String) -> some View {
+        VStack(spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(16)
     }
 }
 
