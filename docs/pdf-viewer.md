@@ -135,6 +135,19 @@ struct PDFEmptyState: View {}
 - After resizing stops, the thumbnail grid is refreshed once using the final
   settled sidebar width.
 
+## Highlights Sidebar Behavior
+- `Highlights and Notes` mode renders annotation cards styled after Preview's
+  notes list rather than a plain text list.
+- Each card shows the page label, optional author name, a left accent bar using
+  the annotation color, up to three lines of extracted highlighted text, and up
+  to three lines of note text when a note exists.
+- Note badges reuse the annotation accent color and switch text color for
+  contrast based on the underlying annotation color.
+- Grouped multi-line markup is collapsed into a single sidebar entry so one
+  logical highlight does not appear as several rows.
+- The sidebar refreshes when highlights, underlines, strikethroughs, colors, or
+  note content change while the mode is visible.
+
 ## Context Menu Markup Picker
 - The annotation context menu keeps a compact first-row markup picker for
   highlight colors, underline, and strikethrough.
