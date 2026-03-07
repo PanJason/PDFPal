@@ -30,7 +30,7 @@ enum PDFSearchMode {}
  *
  * Supported modes:
  * - hidden
- * - thumbnails (marked BUGGY due to known rendering instability)
+ * - thumbnails
  * - tableOfContents
  * - highlightsAndNotes
  * - bookmarks (marked TODO placeholder)
