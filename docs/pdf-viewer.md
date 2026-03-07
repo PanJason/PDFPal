@@ -120,6 +120,21 @@ struct PDFEmptyState: View {}
   - `Enter`: move focus to next match.
   - `Shift+Enter`: move focus to previous match.
 
+## Thumbnail Sidebar Behavior
+- `Thumbnails` mode is implemented with `PDFThumbnailView`, which is sensitive to
+  startup layout timing and continuous live-resize updates.
+- The thumbnail view is only bound after the sidebar has a valid window-attached
+  size. This avoids blank startup renders caused by transient zero-width or
+  oversized layout values during initial AppKit attachment.
+- During sidebar resizing, the app does not continuously rebuild thumbnail cells
+  on every intermediate width change.
+- Instead, resize-driven thumbnail refresh is deferred until the sidebar width
+  settles. This is an intentional design choice to avoid transient PDFKit cell
+  reuse artifacts such as wrong-page images flashing in the wrong slot while the
+  divider is moving.
+- After resizing stops, the thumbnail grid is refreshed once using the final
+  settled sidebar width.
+
 ## Context Menu Markup Picker
 - The annotation context menu keeps a compact first-row markup picker for
   highlight colors, underline, and strikethrough.
@@ -132,8 +147,9 @@ struct PDFEmptyState: View {}
   the requested annotation style to the current text selection.
 
 ## Known Issues / TODO
-- `Thumbnails` mode is marked **BUGGY**. On some machines, thumbnails may render
-  blank at startup until later resize/layout activity occurs.
+- `Thumbnails` mode intentionally favors visual stability over live-resize
+  responsiveness. While dragging the divider, thumbnails may hold their previous
+  geometry until the resize settles, then snap to the final size.
 - `Bookmarks` mode is marked **TODO** and currently only shows a placeholder.
 
 ## Usage Examples
