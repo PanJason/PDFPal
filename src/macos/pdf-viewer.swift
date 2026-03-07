@@ -467,7 +467,7 @@ final class PDFReaderContainerView: NSView {
                         pageLabel: "Page \(index + 1)",
                         authorName: sidebarAuthorName(for: annotationGroup),
                         excerpt: sidebarExcerpt(for: annotationGroup, on: page),
-                        note: sidebarNote(for: annotationGroup),
+                        note: sidebarNote(for: annotationGroup, on: page),
                         accentColor: sidebarAccentColor(for: annotationGroup, isNote: isNote),
                         page: page,
                         annotation: annotation
@@ -557,14 +557,50 @@ final class PDFReaderContainerView: NSView {
         return "Note"
     }
 
-    private func sidebarNote(for annotations: [PDFAnnotation]) -> String? {
+    private func sidebarNote(for annotations: [PDFAnnotation], on page: PDFPage) -> String? {
         for annotation in annotations {
             let note = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !note.isEmpty {
                 return note
             }
+
+            let popupContents = annotation.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !popupContents.isEmpty {
+                return popupContents
+            }
+        }
+
+        let relatedNoteMarkers = page.annotations.filter { candidate in
+            let typeName = (candidate.type ?? "").lowercased()
+            guard typeName.contains("text") else { return false }
+            guard let parent = candidate.value(forAnnotationKey: .parent) as? PDFAnnotation else { return false }
+
+            return annotations.contains(where: { parent === $0 || sidebarAnnotationsLikelySame(parent, $0) })
+        }
+
+        for marker in relatedNoteMarkers {
+            let note = marker.contents?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
+            if !note.isEmpty {
+                return note
+            }
+
+            let popupContents = marker.popup?.contents?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
+            if !popupContents.isEmpty {
+                return popupContents
+            }
         }
         return nil
+    }
+
+    private func sidebarAnnotationsLikelySame(_ lhs: PDFAnnotation, _ rhs: PDFAnnotation) -> Bool {
+        guard lhs.type == rhs.type else { return false }
+
+        let dx = abs(lhs.bounds.origin.x - rhs.bounds.origin.x)
+        let dy = abs(lhs.bounds.origin.y - rhs.bounds.origin.y)
+        let dw = abs(lhs.bounds.size.width - rhs.bounds.size.width)
+        let dh = abs(lhs.bounds.size.height - rhs.bounds.size.height)
+
+        return dx < 0.5 && dy < 0.5 && dw < 0.5 && dh < 0.5
     }
 
     private func sidebarAccentColor(for annotations: [PDFAnnotation], isNote: Bool) -> NSColor {
@@ -1250,6 +1286,10 @@ final class PDFKitView: PDFView {
 
     private func retargetAnnotationMenuItems(in menu: NSMenu) {
         replaceSystemMarkupStylePicker(in: menu)
+        let noteTarget = contextMarkupNoteTarget()
+        var sawRemoveNoteItem = false
+        var addNoteItemIndex: Int?
+
         for item in menu.items {
             if let submenu = item.submenu {
                 retargetAnnotationMenuItems(in: submenu)
@@ -1276,8 +1316,23 @@ final class PDFKitView: PDFView {
             }
 
             if lowerTitle == "add note" {
-                item.action = #selector(handleAddNoteFromContextMenu(_:))
+                if noteTarget?.noteText?.isEmpty == false {
+                    item.title = "Remove Note"
+                    item.action = #selector(handleRemoveNoteFromContextMenu(_:))
+                    sawRemoveNoteItem = true
+                } else {
+                    item.action = #selector(handleAddNoteFromContextMenu(_:))
+                }
                 item.target = self
+                addNoteItemIndex = menu.index(of: item)
+                continue
+            }
+
+            if lowerTitle == "remove note" {
+                item.action = #selector(handleRemoveNoteFromContextMenu(_:))
+                item.target = self
+                item.isEnabled = noteTarget?.noteText?.isEmpty == false
+                sawRemoveNoteItem = true
                 continue
             }
 
@@ -1290,6 +1345,18 @@ final class PDFKitView: PDFView {
             if isStrikeContextItem(item, lowerTitle: lowerTitle) {
                 item.action = #selector(handleContextStrikeToggle(_:))
                 item.target = self
+            }
+        }
+
+        if noteTarget?.noteText?.isEmpty == false,
+           !sawRemoveNoteItem {
+            let removeItem = NSMenuItem(title: "Remove Note", action: #selector(handleRemoveNoteFromContextMenu(_:)), keyEquivalent: "")
+            removeItem.target = self
+
+            if let addNoteItemIndex {
+                menu.insertItem(removeItem, at: addNoteItemIndex + 1)
+            } else {
+                menu.addItem(removeItem)
             }
         }
     }
@@ -1635,6 +1702,19 @@ final class PDFKitView: PDFView {
         }
     }
 
+    @objc private func handleRemoveNoteFromContextMenu(_ sender: NSMenuItem) {
+        guard let noteTarget = contextMarkupNoteTarget() else {
+            NSSound.beep()
+            return
+        }
+        guard noteTarget.noteText?.isEmpty == false else {
+            NSSound.beep()
+            return
+        }
+
+        removeNote(forMarkupCluster: noteTarget.cluster, on: noteTarget.page)
+    }
+
     @objc private func handleContextUnderlineToggle(_ sender: NSMenuItem) {
         applyContextUnderlineToggle()
     }
@@ -1757,6 +1837,48 @@ final class PDFKitView: PDFView {
         }
 
         return nil
+    }
+
+    private struct MarkupNoteTarget {
+        let page: PDFPage
+        let cluster: [PDFAnnotation]
+        let noteText: String?
+    }
+
+    private func contextMarkupNoteTarget() -> MarkupNoteTarget? {
+        if let annotation = contextMenuAnnotation {
+            if isRemovableMarkup(annotation), let page = annotation.page {
+                let cluster = markupCluster(for: annotation, on: page)
+                guard !cluster.isEmpty else { return nil }
+                return MarkupNoteTarget(
+                    page: page,
+                    cluster: cluster,
+                    noteText: noteText(forMarkupCluster: cluster, on: page)
+                )
+            }
+
+            if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation,
+               isRemovableMarkup(parent),
+               let page = parent.page ?? contextMenuPage {
+                let cluster = markupCluster(for: parent, on: page)
+                guard !cluster.isEmpty else { return nil }
+                return MarkupNoteTarget(
+                    page: page,
+                    cluster: cluster,
+                    noteText: noteText(forMarkupCluster: cluster, on: page)
+                )
+            }
+        }
+
+        guard let (page, seeds) = contextMarkupTargets() else { return nil }
+        let cluster = connectedRemovableAnnotations(from: seeds, on: page)
+        let resolvedCluster = cluster.isEmpty ? seeds.filter(isRemovableMarkup) : cluster
+        guard !resolvedCluster.isEmpty else { return nil }
+        return MarkupNoteTarget(
+            page: page,
+            cluster: resolvedCluster,
+            noteText: noteText(forMarkupCluster: resolvedCluster, on: page)
+        )
     }
 
     private func toggleOverlayMarkup(_ subtype: PDFAnnotationSubtype) {
@@ -2163,6 +2285,93 @@ final class PDFKitView: PDFView {
         }
     }
 
+    private func noteText(forMarkupCluster cluster: [PDFAnnotation], on page: PDFPage) -> String? {
+        for markup in cluster {
+            let directContents = markup.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !directContents.isEmpty {
+                return directContents
+            }
+
+            let popupContents = markup.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !popupContents.isEmpty {
+                return popupContents
+            }
+        }
+
+        for marker in markupNoteMarkers(forMarkupCluster: cluster, on: page) {
+            let markerContents = marker.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !markerContents.isEmpty {
+                return markerContents
+            }
+
+            let popupContents = marker.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !popupContents.isEmpty {
+                return popupContents
+            }
+        }
+
+        return nil
+    }
+
+    private func markupNoteMarkers(forMarkupCluster cluster: [PDFAnnotation], on page: PDFPage) -> [PDFAnnotation] {
+        page.annotations.filter { annotation in
+            let typeName = (annotation.type ?? "").lowercased()
+            guard typeName.contains("text") else { return false }
+            guard let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation else { return false }
+
+            return cluster.contains(where: { parent === $0 || annotationsLikelySame(parent, $0) })
+        }
+    }
+
+    private func removeNote(forMarkupCluster cluster: [PDFAnnotation], on page: PDFPage) {
+        var changedAny = false
+        let markers = markupNoteMarkers(forMarkupCluster: cluster, on: page)
+
+        for marker in markers {
+            removeAnnotationAndRelatedNotes(marker, from: page, notifyChange: false)
+            changedAny = true
+        }
+
+        let strayPopups = page.annotations.filter { annotation in
+            let typeName = (annotation.type ?? "").lowercased()
+            guard typeName.contains("popup") else { return false }
+            guard let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation else { return false }
+
+            if cluster.contains(where: { parent === $0 || annotationsLikelySame(parent, $0) }) {
+                return true
+            }
+
+            return markers.contains(where: { parent === $0 || annotationsLikelySame(parent, $0) })
+        }
+        for popup in strayPopups {
+            page.removeAnnotation(popup)
+            changedAny = true
+        }
+
+        for markup in cluster {
+            if markup.contents?.isEmpty == false {
+                markup.contents = nil
+                changedAny = true
+            }
+
+            if let popup = markup.popup {
+                popup.contents = nil
+                if page.annotations.contains(where: { $0 === popup }) {
+                    page.removeAnnotation(popup)
+                }
+                markup.popup = nil
+                changedAny = true
+            }
+        }
+
+        if changedAny {
+            refreshAnnotationRendering(on: page)
+            notifyAnnotationsDidChange()
+        } else {
+            NSSound.beep()
+        }
+    }
+
     private func refreshAnnotationRendering(on page: PDFPage) {
         annotationsChanged(on: page)
         needsDisplay = true
@@ -2267,6 +2476,17 @@ final class PDFKitView: PDFView {
         }
     }
 
+    private func markupCluster(for seed: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        let removable = page.annotations.filter(isRemovableMarkup)
+        let cluster = groupedAnnotations(for: seed, in: removable)
+        return cluster.sorted { lhs, rhs in
+            if abs(lhs.bounds.maxY - rhs.bounds.maxY) > 0.5 {
+                return lhs.bounds.maxY > rhs.bounds.maxY
+            }
+            return lhs.bounds.minX < rhs.bounds.minX
+        }
+    }
+
     private func setMarkupGroupID(_ groupID: String, on annotation: PDFAnnotation) {
         annotation.userName = "\(Self.markupGroupPrefix)\(groupID)"
     }
@@ -2309,7 +2529,7 @@ final class PDFKitView: PDFView {
         return false
     }
 
-    private func removeAnnotationAndRelatedNotes(_ target: PDFAnnotation, from page: PDFPage) {
+    private func removeAnnotationAndRelatedNotes(_ target: PDFAnnotation, from page: PDFPage, notifyChange: Bool = true) {
         var toRemove: [PDFAnnotation] = [target]
 
         if let popup = target.value(forAnnotationKey: .popup) as? PDFAnnotation {
@@ -2331,7 +2551,7 @@ final class PDFKitView: PDFView {
             page.removeAnnotation(annotation)
         }
 
-        if !removed.isEmpty {
+        if notifyChange, !removed.isEmpty {
             notifyAnnotationsDidChange()
         }
     }
