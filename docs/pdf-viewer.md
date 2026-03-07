@@ -145,6 +145,9 @@ struct PDFEmptyState: View {}
   contrast based on the underlying annotation color.
 - Grouped multi-line markup is collapsed into a single sidebar entry so one
   logical highlight does not appear as several rows.
+- For grouped multi-line highlights, sidebar note text is resolved across the
+  whole highlight cluster, including note-marker and popup-backed note content
+  that PDFKit may attach to only one line of the group.
 - The sidebar refreshes when highlights, underlines, strikethroughs, colors, or
   note content change while the mode is visible.
 
@@ -158,6 +161,12 @@ struct PDFEmptyState: View {}
   overlay annotation.
 - When no existing markup is under the context click, the same controls apply
   the requested annotation style to the current text selection.
+- Note editing still uses PDFKit's native add-note UI.
+- For grouped multi-line highlights, note presence is resolved at the highlight
+  cluster level. If any line in the group has a note, right-clicking any line in
+  that group exposes `Remove Note` rather than `Add Note`.
+- Removing a note from a grouped highlight clears the related note marker,
+  popup, and sidebar note state for the whole grouped highlight.
 
 ## Known Issues / TODO
 - `Thumbnails` mode intentionally favors visual stability over live-resize
