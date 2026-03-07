@@ -57,6 +57,7 @@ extension Notification.Name {
     static let pdfSetAnnotationAction = Notification.Name("PDFSetAnnotationAction")
     static let pdfHighlighterPrimaryAction = Notification.Name("PDFHighlighterPrimaryAction")
     static let pdfHighlighterModeChanged = Notification.Name("PDFHighlighterModeChanged")
+    static let pdfAnnotationsDidChange = Notification.Name("PDFAnnotationsDidChange")
     static let pdfSaveDocument = Notification.Name("PDFSaveDocument")
     static let pdfFocusSearch = Notification.Name("PDFFocusSearch")
     static let pdfSearchNext = Notification.Name("PDFSearchNext")
@@ -184,9 +185,12 @@ final class PDFReaderContainerView: NSView {
     private weak var currentDocument: PDFDocument?
     private let sidebarWidth: CGFloat = 180
     private var sidebarFrameObserver: NSObjectProtocol?
+    private var annotationsChangedObserver: NSObjectProtocol?
     private var thumbnailWarmupWorkItem: DispatchWorkItem?
     private var thumbnailWarmupAttemptsRemaining: Int = 0
     private var thumbnailRefreshWorkItem: DispatchWorkItem?
+    private var annotationSidebarMonitorTimer: Timer?
+    private var lastAnnotationSidebarSignature: String?
     private var hasBoundThumbnailView = false
     private let thumbnailResizeSettleDelay: TimeInterval = 0.18
 
@@ -204,8 +208,12 @@ final class PDFReaderContainerView: NSView {
         if let sidebarFrameObserver {
             NotificationCenter.default.removeObserver(sidebarFrameObserver)
         }
+        if let annotationsChangedObserver {
+            NotificationCenter.default.removeObserver(annotationsChangedObserver)
+        }
         thumbnailWarmupWorkItem?.cancel()
         thumbnailRefreshWorkItem?.cancel()
+        annotationSidebarMonitorTimer?.invalidate()
     }
 
     func update(
@@ -219,6 +227,7 @@ final class PDFReaderContainerView: NSView {
         if documentChanged {
             pdfView.document = document
             hasBoundThumbnailView = false
+            lastAnnotationSidebarSignature = nil
         }
 
         pdfView.onAskLLM = onAskLLM
@@ -296,6 +305,18 @@ final class PDFReaderContainerView: NSView {
             }
         }
 
+        annotationsChangedObserver = NotificationCenter.default.addObserver(
+            forName: .pdfAnnotationsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            guard self.currentSidebarMode == .highlightsAndNotes else { return }
+            guard let document = note.object as? PDFDocument else { return }
+            guard self.currentDocument === document else { return }
+            self.refreshHighlightsSidebarIfNeeded(force: true)
+        }
+
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.splitView.setPosition(self.sidebarWidth, ofDividerAt: 0)
@@ -308,6 +329,9 @@ final class PDFReaderContainerView: NSView {
     private func configureSidebar(mode: PDFSidebarMode, document: PDFDocument) {
         if mode != .thumbnails {
             stopThumbnailWarmup()
+        }
+        if mode != .highlightsAndNotes {
+            stopAnnotationSidebarMonitoring()
         }
 
         if mode == .hidden {
@@ -352,6 +376,9 @@ final class PDFReaderContainerView: NSView {
             }
             return []
         }()
+        if mode == .highlightsAndNotes {
+            startAnnotationSidebarMonitoring(for: document)
+        }
         let annotationItems = collectHighlightAndNoteItems(from: document)
         let hosting = NSHostingView(
             rootView: PDFDocumentSidebarContentView(
@@ -411,6 +438,7 @@ final class PDFReaderContainerView: NSView {
 
     private func collectHighlightAndNoteItems(from document: PDFDocument) -> [PDFAnnotationSidebarItem] {
         var items: [PDFAnnotationSidebarItem] = []
+        var seenAnnotationKeys = Set<String>()
 
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index) else { continue }
@@ -423,22 +451,18 @@ final class PDFReaderContainerView: NSView {
 
                 guard isMarkup || isNote else { continue }
 
-                let kind: String = {
-                    if typeName.contains("highlight") { return "Highlight" }
-                    if typeName.contains("underline") { return "Underline" }
-                    if typeName.contains("strike") { return "Strikethrough" }
-                    return "Note"
-                }()
-
-                let rawText = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let summary = rawText.isEmpty ? "\(kind) on page \(index + 1)" : rawText
-                let subtitle = "Page \(index + 1)"
+                let annotationGroup = relatedSidebarAnnotations(for: annotation, on: page)
+                let annotationKey = sidebarAnnotationKey(for: annotation, relatedAnnotations: annotationGroup)
+                guard seenAnnotationKeys.insert(annotationKey).inserted else { continue }
 
                 items.append(
                     PDFAnnotationSidebarItem(
-                        id: "\(index)-\(kind)-\(annotation.bounds.origin.x)-\(annotation.bounds.origin.y)",
-                        title: summary,
-                        subtitle: subtitle,
+                        id: annotationKey,
+                        pageLabel: "Page \(index + 1)",
+                        authorName: sidebarAuthorName(for: annotationGroup),
+                        excerpt: sidebarExcerpt(for: annotationGroup, on: page),
+                        note: sidebarNote(for: annotationGroup),
+                        accentColor: sidebarAccentColor(for: annotationGroup, isNote: isNote),
                         page: page,
                         annotation: annotation
                     )
@@ -446,6 +470,95 @@ final class PDFReaderContainerView: NSView {
             }
         }
         return items
+    }
+
+    private func relatedSidebarAnnotations(for annotation: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        let markupGroupPrefix = "pdfpal-group:"
+        guard let userName = annotation.userName, userName.hasPrefix(markupGroupPrefix) else {
+            return [annotation]
+        }
+
+        let groupID = String(userName.dropFirst(markupGroupPrefix.count))
+        let annotationType = (annotation.type ?? "").lowercased()
+        let grouped = page.annotations.filter { candidate in
+            let candidateType = (candidate.type ?? "").lowercased()
+            guard candidateType == annotationType else { return false }
+            guard let candidateUserName = candidate.userName else { return false }
+            return candidateUserName == "\(markupGroupPrefix)\(groupID)"
+        }
+
+        return grouped.sorted { lhs, rhs in
+            if abs(lhs.bounds.maxY - rhs.bounds.maxY) > 0.5 {
+                return lhs.bounds.maxY > rhs.bounds.maxY
+            }
+            return lhs.bounds.minX < rhs.bounds.minX
+        }
+    }
+
+    private func sidebarAnnotationKey(for annotation: PDFAnnotation, relatedAnnotations: [PDFAnnotation]) -> String {
+        let markupGroupPrefix = "pdfpal-group:"
+        if let userName = annotation.userName, userName.hasPrefix(markupGroupPrefix) {
+            let groupID = String(userName.dropFirst(markupGroupPrefix.count))
+            return "\((annotation.type ?? "").lowercased())-\(groupID)"
+        }
+
+        let bounds = relatedAnnotations.first?.bounds ?? annotation.bounds
+        return "\((annotation.type ?? "").lowercased())-\(bounds.origin.x)-\(bounds.origin.y)-\(bounds.width)-\(bounds.height)"
+    }
+
+    private func sidebarAuthorName(for annotations: [PDFAnnotation]) -> String? {
+        for annotation in annotations {
+            guard let userName = annotation.userName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !userName.isEmpty,
+                  !userName.hasPrefix("pdfpal-group:")
+            else {
+                continue
+            }
+            return userName
+        }
+        return nil
+    }
+
+    private func sidebarExcerpt(for annotations: [PDFAnnotation], on page: PDFPage) -> String {
+        let fragments = annotations.compactMap { annotation in
+            page.selection(for: annotation.bounds)?
+                .string?
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+
+        if !fragments.isEmpty {
+            return fragments.joined(separator: " ")
+        }
+
+        let typeName = (annotations.first?.type ?? "").lowercased()
+        if typeName.contains("highlight") {
+            return "Highlighted text"
+        }
+        if typeName.contains("underline") {
+            return "Underlined text"
+        }
+        if typeName.contains("strike") {
+            return "Struck through text"
+        }
+        return "Note"
+    }
+
+    private func sidebarNote(for annotations: [PDFAnnotation]) -> String? {
+        for annotation in annotations {
+            let note = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !note.isEmpty {
+                return note
+            }
+        }
+        return nil
+    }
+
+    private func sidebarAccentColor(for annotations: [PDFAnnotation], isNote: Bool) -> NSColor {
+        if let color = annotations.first?.color {
+            return color.withAlphaComponent(0.95)
+        }
+        return isNote ? NSColor.systemBlue : NSColor.systemYellow
     }
 
     private func navigateToOutlineItem(_ item: PDFOutlineSidebarItem) {
@@ -598,6 +711,72 @@ final class PDFReaderContainerView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
     }
 
+    private func startAnnotationSidebarMonitoring(for document: PDFDocument) {
+        lastAnnotationSidebarSignature = annotationSidebarSignature(for: document)
+
+        guard annotationSidebarMonitorTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
+            self?.refreshHighlightsSidebarIfNeeded()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        annotationSidebarMonitorTimer = timer
+    }
+
+    private func stopAnnotationSidebarMonitoring() {
+        annotationSidebarMonitorTimer?.invalidate()
+        annotationSidebarMonitorTimer = nil
+        lastAnnotationSidebarSignature = nil
+    }
+
+    private func refreshHighlightsSidebarIfNeeded(force: Bool = false) {
+        guard currentSidebarMode == .highlightsAndNotes else { return }
+        guard let document = currentDocument else { return }
+
+        let nextSignature = annotationSidebarSignature(for: document)
+        guard force || nextSignature != lastAnnotationSidebarSignature else { return }
+
+        lastAnnotationSidebarSignature = nextSignature
+        configureSidebar(mode: .highlightsAndNotes, document: document)
+    }
+
+    private func annotationSidebarSignature(for document: PDFDocument) -> String {
+        var parts: [String] = []
+
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for annotation in page.annotations {
+                let typeName = (annotation.type ?? "").lowercased()
+                let isMarkup = typeName.contains("highlight")
+                    || typeName.contains("underline")
+                    || typeName.contains("strike")
+                let isNote = typeName.contains("text")
+                guard isMarkup || isNote else { continue }
+
+                let bounds = annotation.bounds
+                let rgb = annotation.color.usingColorSpace(.deviceRGB)
+                let colorPart = rgb.map {
+                    "\($0.redComponent),\($0.greenComponent),\($0.blueComponent),\($0.alphaComponent)"
+                } ?? "nil"
+
+                parts.append(
+                    [
+                        "\(pageIndex)",
+                        typeName,
+                        annotation.contents ?? "",
+                        annotation.userName ?? "",
+                        "\(bounds.origin.x)",
+                        "\(bounds.origin.y)",
+                        "\(bounds.size.width)",
+                        "\(bounds.size.height)",
+                        colorPart,
+                    ].joined(separator: "|")
+                )
+            }
+        }
+
+        return parts.joined(separator: "\n")
+    }
+
     private func enforceMinimumSidebarWidthIfNeeded() {
         guard splitView.subviews.count >= 2, !sidebarContainer.isHidden else { return }
         if splitView.subviews[0].frame.width < sidebarWidth {
@@ -617,8 +796,11 @@ private struct PDFOutlineSidebarItem: Identifiable {
 
 private struct PDFAnnotationSidebarItem: Identifiable {
     let id: String
-    let title: String
-    let subtitle: String
+    let pageLabel: String
+    let authorName: String?
+    let excerpt: String
+    let note: String?
+    let accentColor: NSColor
     let page: PDFPage
     let annotation: PDFAnnotation?
 }
@@ -664,26 +846,21 @@ private struct PDFDocumentSidebarContentView: View {
         case .highlightsAndNotes:
             if annotationItems.isEmpty {
                 sidebarEmptyState(title: mode.title, message: "No highlights or notes found.")
-            } else {
-                List(annotationItems) { item in
+        } else {
+            List(annotationItems) { item in
                     Button {
                         onSelectAnnotation(item)
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.title)
-                                .lineLimit(2)
-                                .foregroundColor(.primary)
-                            Text(item.subtitle)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                        annotationCard(item)
                     }
                     .buttonStyle(.plain)
-                }
-                .listStyle(.sidebar)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
+                    .listRowBackground(Color.clear)
             }
-        case .hidden, .thumbnails:
-            EmptyView()
+            .listStyle(.sidebar)
+        }
+    case .hidden, .thumbnails:
+        EmptyView()
         }
     }
 
@@ -698,6 +875,71 @@ private struct PDFDocumentSidebarContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(16)
+    }
+
+    private func annotationCard(_ item: PDFAnnotationSidebarItem) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color(nsColor: item.accentColor))
+                .frame(width: 3)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(item.pageLabel)
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.secondary)
+                    Spacer(minLength: 8)
+                    if let authorName = item.authorName {
+                        Text(authorName)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Text(item.excerpt)
+                    .font(.body)
+                    .foregroundColor(.primary)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+
+                if let note = item.note, !note.isEmpty {
+                    Text(note)
+                        .font(.body)
+                        .foregroundColor(annotationNoteTextColor(for: item.accentColor))
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(annotationNoteBackgroundColor(for: item.accentColor))
+                        )
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    private func annotationNoteBackgroundColor(for accentColor: NSColor) -> Color {
+        Color(nsColor: accentColor.withAlphaComponent(0.78))
+    }
+
+    private func annotationNoteTextColor(for accentColor: NSColor) -> Color {
+        guard let rgb = accentColor.usingColorSpace(.deviceRGB) else {
+            return .white
+        }
+
+        let brightness =
+            (0.299 * rgb.redComponent)
+            + (0.587 * rgb.greenComponent)
+            + (0.114 * rgb.blueComponent)
+
+        return brightness > 0.68 ? .black.opacity(0.82) : .white
     }
 }
 
@@ -1340,6 +1582,7 @@ final class PDFKitView: PDFView {
 
         if highlights.isEmpty {
             let groupID = UUID().uuidString
+            var addedAny = false
             for bounds in anchorBounds {
                 if hasEquivalentAnnotation(on: page, action: action, bounds: bounds) {
                     continue
@@ -1347,6 +1590,10 @@ final class PDFKitView: PDFView {
                 let annotation = makeAnnotation(for: action, bounds: bounds)
                 setMarkupGroupID(groupID, on: annotation)
                 page.addAnnotation(annotation)
+                addedAny = true
+            }
+            if addedAny {
+                notifyAnnotationsDidChange()
             }
             return
         }
@@ -1354,6 +1601,7 @@ final class PDFKitView: PDFView {
         for annotation in highlights {
             annotation.color = newColor
         }
+        notifyAnnotationsDidChange()
     }
 
     @objc private func handleAddNoteFromContextMenu(_ sender: NSMenuItem) {
@@ -1365,6 +1613,7 @@ final class PDFKitView: PDFView {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.normalizeRelatedNoteColors(on: targetPage, targetMarkup: targetMarkup)
+            self.notifyAnnotationsDidChange()
         }
     }
 
@@ -1526,6 +1775,7 @@ final class PDFKitView: PDFView {
         }
 
         let overlayGroupID = UUID().uuidString
+        var addedAny = false
         for bounds in anchorBounds {
             let overlays = matchingMarkupAnnotations(on: page, subtype: subtype, around: bounds)
             if !overlays.isEmpty {
@@ -1535,6 +1785,10 @@ final class PDFKitView: PDFView {
             annotation.color = preferredOverlayColor(on: page, bounds: bounds)
             setMarkupGroupID(overlayGroupID, on: annotation)
             page.addAnnotation(annotation)
+            addedAny = true
+        }
+        if addedAny {
+            notifyAnnotationsDidChange()
         }
     }
 
@@ -1609,6 +1863,7 @@ final class PDFKitView: PDFView {
         }
 
         let groupID = UUID().uuidString
+        var addedAny = false
         for lineSelection in lineSelections {
             guard let page = lineSelection.pages.first else { continue }
             let bounds = lineSelection.bounds(for: page)
@@ -1621,6 +1876,10 @@ final class PDFKitView: PDFView {
             let annotation = makeAnnotation(for: action, bounds: bounds)
             setMarkupGroupID(groupID, on: annotation)
             page.addAnnotation(annotation)
+            addedAny = true
+        }
+        if addedAny {
+            notifyAnnotationsDidChange()
         }
     }
 
@@ -1757,6 +2016,11 @@ final class PDFKitView: PDFView {
         if let popup = targetMarkup?.popup {
             popup.color = NSColor.white
         }
+    }
+
+    private func notifyAnnotationsDidChange() {
+        guard let document else { return }
+        NotificationCenter.default.post(name: .pdfAnnotationsDidChange, object: document)
     }
 
     private func annotationTypeMatches(_ annotation: PDFAnnotation, subtype: PDFAnnotationSubtype) -> Bool {
@@ -1915,6 +2179,10 @@ final class PDFKitView: PDFView {
             let id = ObjectIdentifier(annotation)
             guard removed.insert(id).inserted else { continue }
             page.removeAnnotation(annotation)
+        }
+
+        if !removed.isEmpty {
+            notifyAnnotationsDidChange()
         }
     }
 
