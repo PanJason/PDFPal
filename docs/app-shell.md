@@ -13,6 +13,8 @@ app delegate also applies the app icon at launch using the bundled
 menu action (`Cmd+S`) is wired to save the current PDF with annotation changes.
 The toolbar also includes a PDF search field with mode switching (`Any Match`
 or `Exact Phrase`) and supports `Cmd+F` to focus the search field.
+The PDF sidebar view menu includes `Thumbnails (BUGGY)` and `Bookmarks (TODO)`
+to reflect current implementation status.
 
 ## Public API
 ```swift
@@ -104,6 +106,8 @@ struct GeminiLLMChatServing: View {}
   `pdfSearchPrevious`.
 - Search query and mode are passed into `PDFViewer`, where `PDFKitView`
   executes the document search.
+- PDF sidebar mode is passed into `PDFViewer`; current options include
+  `Thumbnails (BUGGY)` and `Bookmarks (TODO)` status labels in the menu.
 
 ## Usage Examples
 ```swift

@@ -26,11 +26,24 @@ enum PDFAnnotationAction {}
 enum PDFSearchMode {}
 
 /**
+ * PDFSidebarMode - Left sidebar mode for the PDF viewer
+ *
+ * Supported modes:
+ * - hidden
+ * - thumbnails (marked BUGGY due to known rendering instability)
+ * - tableOfContents
+ * - highlightsAndNotes
+ * - bookmarks (marked TODO placeholder)
+ */
+enum PDFSidebarMode {}
+
+/**
  * PDFViewer - SwiftUI wrapper for PDFKit rendering
  * @fileURL: Optional file URL for the PDF to display
  * @onAskLLM: Callback invoked when the user selects Ask LLM from the context menu
  * @searchQuery: Current toolbar query text
  * @searchMode: Current toolbar search mode
+ * @sidebarMode: Current selected left sidebar mode
  *
  * Displays a PDF with auto-scaling, shows empty/error states, and routes the
  * current selection to the app shell when Ask LLM is chosen.
@@ -95,6 +108,8 @@ struct PDFEmptyState: View {}
   annotation and note edits to disk.
 - App shell search state (`searchQuery`, `searchMode`) is passed to
   `PDFKitView`, which executes synchronous document search via PDFKit.
+- App shell sidebar state (`sidebarMode`) is passed to `PDFReaderContainerView`
+  to switch between hidden/thumbnails/table-of-contents/highlights/bookmarks.
 - Search mode behavior:
   - `Any Match`: query is tokenized by whitespace and matches any token.
   - `Exact Phrase`: query is matched as one phrase.
@@ -115,6 +130,11 @@ struct PDFEmptyState: View {}
   overlay annotation.
 - When no existing markup is under the context click, the same controls apply
   the requested annotation style to the current text selection.
+
+## Known Issues / TODO
+- `Thumbnails` mode is marked **BUGGY**. On some machines, thumbnails may render
+  blank at startup until later resize/layout activity occurs.
+- `Bookmarks` mode is marked **TODO** and currently only shows a placeholder.
 
 ## Usage Examples
 ```swift
