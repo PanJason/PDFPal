@@ -228,6 +228,7 @@ final class PDFReaderContainerView: NSView {
             pdfView.document = document
             hasBoundThumbnailView = false
             lastAnnotationSidebarSignature = nil
+            pdfView.normalizeMarkupNotes(in: document)
         }
 
         pdfView.onAskLLM = onAskLLM
@@ -450,6 +451,11 @@ final class PDFReaderContainerView: NSView {
                 let isNote = typeName.contains("text")
 
                 guard isMarkup || isNote else { continue }
+                if isNote,
+                   let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation,
+                   isSidebarMarkupAnnotation(parent) {
+                    continue
+                }
 
                 let annotationGroup = relatedSidebarAnnotations(for: annotation, on: page)
                 let annotationKey = sidebarAnnotationKey(for: annotation, relatedAnnotations: annotationGroup)
@@ -470,6 +476,13 @@ final class PDFReaderContainerView: NSView {
             }
         }
         return items
+    }
+
+    private func isSidebarMarkupAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        let typeName = (annotation.type ?? "").lowercased()
+        return typeName.contains("highlight")
+            || typeName.contains("underline")
+            || typeName.contains("strike")
     }
 
     private func relatedSidebarAnnotations(for annotation: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
@@ -751,6 +764,11 @@ final class PDFReaderContainerView: NSView {
                     || typeName.contains("strike")
                 let isNote = typeName.contains("text")
                 guard isMarkup || isNote else { continue }
+                if isNote,
+                   let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation,
+                   isSidebarMarkupAnnotation(parent) {
+                    continue
+                }
 
                 let bounds = annotation.bounds
                 let rgb = annotation.color.usingColorSpace(.deviceRGB)
@@ -2007,7 +2025,7 @@ final class PDFKitView: PDFView {
 
             guard isRelatedToTarget || isMarkupNote else { continue }
 
-            annotation.color = NSColor.white
+            normalizeMarkupNoteAnnotation(annotation, targetMarkup: targetMarkup)
             if let popup = annotation.popup {
                 popup.color = NSColor.white
             }
@@ -2016,6 +2034,138 @@ final class PDFKitView: PDFView {
         if let popup = targetMarkup?.popup {
             popup.color = NSColor.white
         }
+        if let targetMarkup {
+            _ = synchronizeMarkupNoteMarker(for: targetMarkup, on: page)
+        }
+
+        refreshAnnotationRendering(on: page)
+    }
+
+    private func relatedNoteMarkerColor(for annotation: PDFAnnotation, targetMarkup: PDFAnnotation?) -> NSColor {
+        if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation {
+            return parent.color.withAlphaComponent(1.0)
+        }
+        if let popupParent = annotation.value(forAnnotationKey: .popup) as? PDFAnnotation {
+            return popupParent.color.withAlphaComponent(1.0)
+        }
+        if let targetMarkup {
+            return targetMarkup.color.withAlphaComponent(1.0)
+        }
+        return NSColor.systemYellow
+    }
+
+    fileprivate func normalizeMarkupNotes(in document: PDFDocument) {
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let markupAnnotations = page.annotations.filter(isRemovableMarkup)
+            let normalizedAny = markupAnnotations.reduce(false) { partialResult, markup in
+                synchronizeMarkupNoteMarker(for: markup, on: page) || partialResult
+            }
+
+            if normalizedAny {
+                refreshAnnotationRendering(on: page)
+            }
+        }
+    }
+
+    @discardableResult
+    private func synchronizeMarkupNoteMarker(for markup: PDFAnnotation, on page: PDFPage) -> Bool {
+        let noteText = noteText(for: markup)
+        let markers = markupNoteMarkers(for: markup, on: page)
+
+        guard let noteText, !noteText.isEmpty else {
+            var removedAny = false
+            for marker in markers {
+                page.removeAnnotation(marker)
+                removedAny = true
+            }
+            return removedAny
+        }
+
+        let marker = markers.first ?? makeMarkupNoteMarker(for: markup, on: page)
+        let markerWasNew = markers.isEmpty
+        normalizeMarkupNoteAnnotation(marker, targetMarkup: markup)
+        marker.contents = noteText
+        marker.bounds = markupNoteMarkerBounds(for: markup, on: page)
+
+        if markerWasNew {
+            page.addAnnotation(marker)
+        }
+
+        if markers.count > 1 {
+            for extraMarker in markers.dropFirst() {
+                page.removeAnnotation(extraMarker)
+            }
+        }
+
+        return markerWasNew || markers.count > 1
+    }
+
+    private func noteText(for markup: PDFAnnotation) -> String? {
+        let directContents = markup.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !directContents.isEmpty {
+            return directContents
+        }
+
+        let popupContents = markup.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !popupContents.isEmpty {
+            return popupContents
+        }
+
+        return nil
+    }
+
+    private func markupNoteMarkers(for markup: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        page.annotations.filter { annotation in
+            let typeName = (annotation.type ?? "").lowercased()
+            guard typeName.contains("text") else { return false }
+
+            if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation {
+                return parent === markup || annotationsLikelySame(parent, markup)
+            }
+            return false
+        }
+    }
+
+    private func makeMarkupNoteMarker(for markup: PDFAnnotation, on page: PDFPage) -> PDFAnnotation {
+        let marker = PDFAnnotation(
+            bounds: markupNoteMarkerBounds(for: markup, on: page),
+            forType: .text,
+            withProperties: nil
+        )
+        _ = marker.setValue(markup, forAnnotationKey: .parent)
+        return marker
+    }
+
+    private func markupNoteMarkerBounds(for markup: PDFAnnotation, on page: PDFPage) -> CGRect {
+        let pageBounds = page.bounds(for: .cropBox)
+        let markerSize = CGSize(width: 18, height: 18)
+
+        let proposedX = markup.bounds.maxX + 6
+        let proposedY = markup.bounds.maxY - markerSize.height
+
+        let clampedX = min(max(pageBounds.minX, proposedX), pageBounds.maxX - markerSize.width)
+        let clampedY = min(max(pageBounds.minY, proposedY), pageBounds.maxY - markerSize.height)
+
+        return CGRect(origin: CGPoint(x: clampedX, y: clampedY), size: markerSize)
+    }
+
+    private func normalizeMarkupNoteAnnotation(_ annotation: PDFAnnotation, targetMarkup: PDFAnnotation?) {
+        annotation.shouldDisplay = true
+        annotation.color = relatedNoteMarkerColor(
+            for: annotation,
+            targetMarkup: targetMarkup
+        )
+
+        let typeName = (annotation.type ?? "").lowercased()
+        if typeName.contains("text") {
+            annotation.iconType = .note
+        }
+    }
+
+    private func refreshAnnotationRendering(on page: PDFPage) {
+        annotationsChanged(on: page)
+        needsDisplay = true
     }
 
     private func notifyAnnotationsDidChange() {
