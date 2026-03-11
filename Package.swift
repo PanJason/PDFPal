@@ -12,12 +12,19 @@ let package = Package(
             targets: ["LLMPaperReadingHelper"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/colinc86/MathJaxSwift.git", from: "3.4.0")
+    ],
     targets: [
         .executableTarget(
             name: "LLMPaperReadingHelper",
+            dependencies: [
+                .product(name: "MathJaxSwift", package: "MathJaxSwift")
+            ],
             path: "src/macos",
             linkerSettings: [
-                .linkedFramework("PDFKit")
+                .linkedFramework("PDFKit"),
+                .linkedFramework("WebKit")
             ]
         )
     ]
