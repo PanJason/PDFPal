@@ -67,6 +67,7 @@ extension Notification.Name {
 struct PDFViewer: View {
     let fileURL: URL?
     let onAskLLM: (String) -> Void
+    let onAnnotationSelectionChanged: AnnotationSelectionHandler
     let searchQuery: String
     let searchMode: PDFSearchMode
     let sidebarMode: PDFSidebarMode
@@ -80,6 +81,7 @@ struct PDFViewer: View {
                 PDFKitContainer(
                     document: document,
                     onAskLLM: onAskLLM,
+                    onAnnotationSelectionChanged: onAnnotationSelectionChanged,
                     searchQuery: searchQuery,
                     searchMode: searchMode,
                     sidebarMode: sidebarMode
@@ -125,6 +127,7 @@ struct PDFViewer: View {
 struct PDFKitContainer: NSViewRepresentable {
     let document: PDFDocument
     let onAskLLM: (String) -> Void
+    let onAnnotationSelectionChanged: AnnotationSelectionHandler
     let searchQuery: String
     let searchMode: PDFSearchMode
     let sidebarMode: PDFSidebarMode
@@ -134,6 +137,7 @@ struct PDFKitContainer: NSViewRepresentable {
         container.update(
             document: document,
             onAskLLM: onAskLLM,
+            onAnnotationSelectionChanged: onAnnotationSelectionChanged,
             searchQuery: searchQuery,
             searchMode: searchMode,
             sidebarMode: sidebarMode
@@ -145,6 +149,7 @@ struct PDFKitContainer: NSViewRepresentable {
         container.update(
             document: document,
             onAskLLM: onAskLLM,
+            onAnnotationSelectionChanged: onAnnotationSelectionChanged,
             searchQuery: searchQuery,
             searchMode: searchMode,
             sidebarMode: sidebarMode
@@ -219,6 +224,7 @@ final class PDFReaderContainerView: NSView {
     func update(
         document: PDFDocument,
         onAskLLM: @escaping (String) -> Void,
+        onAnnotationSelectionChanged: @escaping AnnotationSelectionHandler,
         searchQuery: String,
         searchMode: PDFSearchMode,
         sidebarMode: PDFSidebarMode
@@ -232,6 +238,7 @@ final class PDFReaderContainerView: NSView {
         }
 
         pdfView.onAskLLM = onAskLLM
+        pdfView.onAnnotationSelectionChanged = onAnnotationSelectionChanged
         pdfView.updateSearch(query: searchQuery, mode: searchMode)
 
         if documentChanged || sidebarMode != currentSidebarMode {
@@ -391,6 +398,7 @@ final class PDFReaderContainerView: NSView {
                 },
                 onSelectAnnotation: { [weak self] item in
                     self?.navigateToAnnotationItem(item)
+                    self?.publishAnnotationSelection(for: item)
                 }
             )
         )
@@ -628,6 +636,17 @@ final class PDFReaderContainerView: NSView {
             return
         }
         pdfView.go(to: item.page)
+    }
+
+    private func publishAnnotationSelection(for item: PDFAnnotationSidebarItem) {
+        guard let annotation = item.annotation else {
+            pdfView.onAnnotationSelectionChanged?(nil)
+            return
+        }
+        pdfView.publishAnnotationSelection(
+            for: annotation,
+            fallbackPage: item.page
+        )
     }
 
     override func layout() {
@@ -1001,6 +1020,7 @@ final class PDFKitView: PDFView {
     private static let markupGroupPrefix = "pdfpal-group:"
 
     var onAskLLM: ((String) -> Void)?
+    var onAnnotationSelectionChanged: AnnotationSelectionHandler?
     private var lastSelectionText: String = ""
     private var contextMenuAnnotation: PDFAnnotation?
     private var contextMenuPage: PDFPage?
@@ -1060,6 +1080,12 @@ final class PDFKitView: PDFView {
 
     override func setCurrentSelection(_ selection: PDFSelection?, animate: Bool) {
         super.setCurrentSelection(selection, animate: animate)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        let clickedAnnotation = annotation(at: event)
+        publishAnnotationSelection(for: clickedAnnotation, fallbackPage: contextMenuPage)
     }
 
     func updateSearch(query: String, mode: PDFSearchMode) {
@@ -1265,6 +1291,7 @@ final class PDFKitView: PDFView {
         let selectionText = currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         lastSelectionText = selectionText
         contextMenuAnnotation = annotation(at: event)
+        publishAnnotationSelection(for: contextMenuAnnotation, fallbackPage: contextMenuPage)
 
         menu.items.removeAll { $0.tag == 9100 }
         while menu.items.last?.isSeparatorItem == true {
@@ -1845,6 +1872,13 @@ final class PDFKitView: PDFView {
         let noteText: String?
     }
 
+    private struct ResolvedAnnotationRenderTarget {
+        let page: PDFPage
+        let bounds: CGRect
+        let rawText: String
+        let authorName: String?
+    }
+
     private func contextMarkupNoteTarget() -> MarkupNoteTarget? {
         if let annotation = contextMenuAnnotation {
             if isRemovableMarkup(annotation), let page = annotation.page {
@@ -2367,9 +2401,108 @@ final class PDFKitView: PDFView {
         if changedAny {
             refreshAnnotationRendering(on: page)
             notifyAnnotationsDidChange()
+            onAnnotationSelectionChanged?(nil)
         } else {
             NSSound.beep()
         }
+    }
+
+    func publishAnnotationSelection(for annotation: PDFAnnotation, fallbackPage: PDFPage? = nil) {
+        publishAnnotationSelection(for: Optional(annotation), fallbackPage: fallbackPage)
+    }
+
+    private func publishAnnotationSelection(for annotation: PDFAnnotation?, fallbackPage: PDFPage?) {
+        guard let target = resolvedAnnotationRenderTarget(for: annotation, fallbackPage: fallbackPage) else {
+            onAnnotationSelectionChanged?(nil)
+            return
+        }
+        let documentPath = document?.documentURL?.path ?? ""
+        let pageIndex = document.flatMap { $0.index(for: target.page) } ?? 0
+        onAnnotationSelectionChanged?(
+            AnnotationRenderSelection(
+                documentPath: documentPath,
+                pageIndex: pageIndex,
+                annotationBounds: target.bounds,
+                rawText: target.rawText,
+                authorName: target.authorName
+            )
+        )
+    }
+
+    private func resolvedAnnotationRenderTarget(
+        for annotation: PDFAnnotation?,
+        fallbackPage: PDFPage?
+    ) -> ResolvedAnnotationRenderTarget? {
+        guard let annotation else { return nil }
+
+        if isRemovableMarkup(annotation),
+           let page = annotation.page ?? fallbackPage {
+            let cluster = markupCluster(for: annotation, on: page)
+            let resolvedCluster = cluster.isEmpty ? [annotation] : cluster
+            guard let rawText = noteText(forMarkupCluster: resolvedCluster, on: page)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !rawText.isEmpty
+            else {
+                return nil
+            }
+            let bounds = resolvedCluster.reduce(annotation.bounds) { partialResult, item in
+                partialResult.union(item.bounds)
+            }
+            return ResolvedAnnotationRenderTarget(
+                page: page,
+                bounds: bounds,
+                rawText: rawText,
+                authorName: authorName(for: resolvedCluster)
+            )
+        }
+
+        if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation,
+           isRemovableMarkup(parent),
+           let page = parent.page ?? fallbackPage {
+            let cluster = markupCluster(for: parent, on: page)
+            let resolvedCluster = cluster.isEmpty ? [parent] : cluster
+            guard let rawText = noteText(forMarkupCluster: resolvedCluster, on: page)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !rawText.isEmpty
+            else {
+                return nil
+            }
+            let bounds = resolvedCluster.reduce(parent.bounds) { partialResult, item in
+                partialResult.union(item.bounds)
+            }
+            return ResolvedAnnotationRenderTarget(
+                page: page,
+                bounds: bounds,
+                rawText: rawText,
+                authorName: authorName(for: [annotation] + resolvedCluster)
+            )
+        }
+
+        guard let page = annotation.page ?? fallbackPage else { return nil }
+        let directContents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let popupContents = annotation.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawText = !directContents.isEmpty ? directContents : popupContents
+        guard !rawText.isEmpty else { return nil }
+
+        return ResolvedAnnotationRenderTarget(
+            page: page,
+            bounds: annotation.bounds,
+            rawText: rawText,
+            authorName: authorName(for: [annotation])
+        )
+    }
+
+    private func authorName(for annotations: [PDFAnnotation]) -> String? {
+        for annotation in annotations {
+            guard let userName = annotation.userName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !userName.isEmpty,
+                  !userName.hasPrefix(Self.markupGroupPrefix)
+            else {
+                continue
+            }
+            return userName
+        }
+        return nil
     }
 
     private func refreshAnnotationRendering(on page: PDFPage) {

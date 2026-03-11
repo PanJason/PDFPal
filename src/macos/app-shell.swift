@@ -56,8 +56,10 @@ struct AppShellView: View {
     @State private var isPickingFile = false
     @State private var fileURL: URL? = nil
     @State private var isChatVisible = false
+    @State private var isAnnotationPreviewVisible = false
     @State private var isSessionSidebarVisible = true
     @State private var selectionText = ""
+    @State private var annotationSelection: AnnotationRenderSelection?
     @State private var openErrorMessage = ""
     @State private var isShowingOpenError = false
     @State private var selectedProvider: LLMProvider = .openAI
@@ -71,12 +73,14 @@ struct AppShellView: View {
     @StateObject private var openAISessionStore = SessionStore(provider: .openAI)
     @StateObject private var claudeSessionStore = SessionStore(provider: .claude)
     @StateObject private var geminiSessionStore = SessionStore(provider: .gemini)
+    private let renderPipeline = RenderPipeline()
 
     var body: some View {
         HSplitView {
             PDFViewer(
                 fileURL: fileURL,
                 onAskLLM: handleAskLLM,
+                onAnnotationSelectionChanged: handleAnnotationSelectionChanged,
                 searchQuery: searchQuery,
                 searchMode: searchMode,
                 sidebarMode: selectedPDFSidebarMode
@@ -89,6 +93,15 @@ struct AppShellView: View {
             } else {
                 EmptyChatPlaceholder()
                     .frame(minWidth: 320)
+            }
+
+            if isAnnotationPreviewVisible {
+                AnnotationPreviewPanel(
+                    selection: annotationSelection,
+                    pipeline: renderPipeline,
+                    onClose: { isAnnotationPreviewVisible = false }
+                )
+                .frame(minWidth: 280)
             }
         }
         .toolbar {
@@ -168,6 +181,7 @@ struct AppShellView: View {
                     Toggle("Chat Panel", isOn: $isChatVisible)
                     Toggle("Sessions Sidebar", isOn: $isSessionSidebarVisible)
                         .disabled(!isChatVisible)
+                    Toggle("Annotation Preview", isOn: $isAnnotationPreviewVisible)
                     Divider()
                     pdfSidebarModeMenuItem(.hidden)
                     pdfSidebarModeMenuItem(.thumbnails)
@@ -286,6 +300,7 @@ struct AppShellView: View {
     private func handleOpenFile(_ url: URL) {
         fileURL = url
         selectionText = ""
+        annotationSelection = nil
         let path = url.path
         if let existingSession = activeSessionStore.latestSession(matchingPDFPath: path) {
             activeSessionStore.selectSession(existingSession.id)
@@ -313,12 +328,21 @@ struct AppShellView: View {
         guard let path = store.activeSession?.openPDFPath else {
             fileURL = nil
             selectionText = ""
+            annotationSelection = nil
             return
         }
         let nextURL = URL(fileURLWithPath: path)
         if fileURL?.path != nextURL.path {
             fileURL = nextURL
             selectionText = ""
+            annotationSelection = nil
+        }
+    }
+
+    private func handleAnnotationSelectionChanged(_ selection: AnnotationRenderSelection?) {
+        annotationSelection = selection
+        if selection != nil {
+            isAnnotationPreviewVisible = true
         }
     }
 
