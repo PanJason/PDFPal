@@ -2,19 +2,18 @@
 
 ## Overview
 The macOS App Shell provides the SwiftUI application entry point, window
-lifecycle, and split view layout that hosts the PDF panel and chat panel. It
-also handles file selection via the system file importer and manages the
-routing state that reveals the chat panel when an Ask LLM action occurs. It
-also exposes a model family picker (OpenAI, Claude, Gemini) in the toolbar and
-a PDF annotation menu (highlight/underline/strikethrough) in the toolbar. It
-also includes a view menu that toggles the chat panel and session sidebar. The
-app delegate also applies the app icon at launch using the bundled
+lifecycle, and split view layout that hosts the PDF panel, chat panel, and
+annotation preview panel. It handles file selection via the system file
+importer, reveals the chat panel when an Ask LLM action occurs, and reveals the
+annotation preview panel when the user selects or opens a PDF annotation note.
+It also exposes a model family picker (OpenAI, Claude, Gemini) in the toolbar,
+a PDF annotation menu (highlight/underline/strikethrough), and a view menu that
+toggles the chat panel, session sidebar, annotation preview, and PDF sidebar
+mode. The app delegate also applies the app icon at launch using the bundled
 `app_icon.png` asset with a SwiftPM fallback for development. A `File > Save`
 menu action (`Cmd+S`) is wired to save the current PDF with annotation changes.
 The toolbar also includes a PDF search field with mode switching (`Any Match`
 or `Exact Phrase`) and supports `Cmd+F` to focus the search field.
-The PDF sidebar view menu includes `Thumbnails (BUGGY)` and `Bookmarks (TODO)`
-to reflect current implementation status.
 
 ## Public API
 ```swift
@@ -30,8 +29,9 @@ struct LLMPaperReadingHelperApp: App {}
 /**
  * AppShellView - Main split view shell for macOS
  *
- * Owns UI state for selected PDF URL, selection text, and whether the chat
- * panel is visible. Hosts PDFViewer and the chat panel. Allows switching
+ * Owns UI state for selected PDF URL, selection text, the active annotation
+ * preview selection, and whether the chat/preview panels are visible. Hosts
+ * PDFViewer, the chat panel, and AnnotationPreviewPanel. Allows switching
  * between model families.
  */
 struct AppShellView: View {}
@@ -71,15 +71,29 @@ struct ClaudeLLMChatServing: View {}
  * Wraps the generic ChatPanel with Gemini defaults.
  */
 struct GeminiLLMChatServing: View {}
+
+/**
+ * AnnotationPreviewPanel - Right-side rendered annotation note preview
+ * @selection: Current PDF annotation note selection to render
+ * @pipeline: Shared render pipeline used to convert Markdown and math to HTML
+ * @onClose: Callback when the preview panel is dismissed
+ *
+ * Renders the currently selected/opened PDF annotation note as formatted
+ * Markdown with math support in a dedicated panel.
+ */
+struct AnnotationPreviewPanel: View {}
 ```
 
 ## State Management
 - `AppShellView` owns `@State` properties for file selection, chat visibility,
-  selection text, provider selection, and error presentation, plus
-  `@StateObject` session stores for each provider.
+  annotation preview visibility, selection text, current annotation note
+  selection, provider selection, and error presentation, plus `@StateObject`
+  session stores for each provider.
 - `AppShellView` also owns `searchQuery` and `searchMode` state, and a search
   focus request token used by `Cmd+F` to focus the toolbar search field.
 - `selectionText` is updated when `PDFViewer` invokes the Ask LLM callback.
+- `annotationSelection` is updated when `PDFViewer` reports the currently
+  selected/opened PDF annotation note.
 - Ask LLM only updates context on the active session when it matches the
   current PDF; otherwise it creates a session only if a provider key exists.
 - `documentId` is derived from the selected file name and passed into the
@@ -87,14 +101,22 @@ struct GeminiLLMChatServing: View {}
 - When a session is selected, the app shell reopens the session's associated
   PDF path so the left panel follows the active session.
 - Restored sessions are wired to reopen their PDFs as soon as they are selected.
+- When the user opens a different PDF or switches to a session for another PDF,
+  the current annotation preview selection is cleared.
 
 ## Integration Points
-- PDF rendering and selection are provided by `PDFViewer` from
+- PDF rendering, search, and Ask LLM selection are provided by `PDFViewer` from
   `src/macos/pdf-viewer.swift`.
+- Annotation note selection is also provided by `PDFViewer`, which bridges
+  PDFKit annotation state into `AnnotationRenderSelection` values for the app
+  shell.
 - Chat rendering is provided by `OpenAILLMChatServing` in
   `src/macos/app-shell.swift` (or `ClaudeLLMChatServing`), which delegates to
   `ChatPanel` in `src/macos/chat-panel.swift` with the provider-specific
   `SessionStore`.
+- Annotation note preview rendering is provided by `AnnotationPreviewPanel` in
+  `src/macos/notes-panel.swift`, which uses `RenderPipeline` and `RenderView`
+  from `src/macos/render/`.
 - File import uses SwiftUI `fileImporter` with `UTType.pdf`.
 - Toolbar annotation actions are broadcast as `PDFAnnotationAction` via
   `Notification.Name.pdfApplyAnnotation` and applied by `PDFKitView`.
@@ -106,8 +128,8 @@ struct GeminiLLMChatServing: View {}
   `pdfSearchPrevious`.
 - Search query and mode are passed into `PDFViewer`, where `PDFKitView`
   executes the document search.
-- PDF sidebar mode is passed into `PDFViewer`; current options include
-  `Thumbnails (BUGGY)` and `Bookmarks (TODO)` status labels in the menu.
+- The view menu includes an `Annotation Preview` toggle. The preview panel also
+  opens automatically when a note-bearing annotation is selected.
 
 ## Usage Examples
 ```swift
@@ -116,15 +138,26 @@ AppShellView()
 ```
 
 ```swift
-// Example of wiring the PDF panel with the chat panel.
 HSplitView {
-    PDFViewer(fileURL: fileURL, onAskLLM: handleAskLLM)
+    PDFViewer(
+        fileURL: fileURL,
+        onAskLLM: handleAskLLM,
+        onAnnotationSelectionChanged: handleAnnotationSelectionChanged,
+        searchQuery: searchQuery,
+        searchMode: searchMode,
+        sidebarMode: selectedPDFSidebarMode
+    )
     OpenAILLMChatServing(
         documentId: documentId,
         selectionText: selectionText,
         openPDFPath: fileURL?.path,
         sessionStore: openAISessionStore,
         onClose: closeChat
+    )
+    AnnotationPreviewPanel(
+        selection: annotationSelection,
+        pipeline: renderPipeline,
+        onClose: closePreview
     )
 }
 ```

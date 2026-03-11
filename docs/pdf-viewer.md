@@ -4,9 +4,10 @@
 The PDF Viewer component hosts a native PDFKit view inside SwiftUI. It handles
 loading a local PDF file, shows an empty or error state when appropriate, and
 adds context menu actions for Ask LLM and PDF annotations. It supports
-highlighting selections with color, underlining, strikethrough, and editing
-annotation notes from a right-click menu on existing annotations. Existing
-annotations can also be removed, and existing notes can be removed directly.
+highlighting selections with color, underlining, strikethrough, editing
+annotation notes from a right-click menu on existing annotations, and
+publishing the currently selected/opened note-bearing annotation into the
+annotation preview pipeline.
 
 ## Public API
 ```swift
@@ -41,17 +42,15 @@ enum PDFSidebarMode {}
  * PDFViewer - SwiftUI wrapper for PDFKit rendering
  * @fileURL: Optional file URL for the PDF to display
  * @onAskLLM: Callback invoked when the user selects Ask LLM from the context menu
+ * @onAnnotationSelectionChanged: Callback invoked when the user selects or opens
+ * a note-bearing PDF annotation
  * @searchQuery: Current toolbar query text
  * @searchMode: Current toolbar search mode
  * @sidebarMode: Current selected left sidebar mode
  *
- * Displays a PDF with auto-scaling, shows empty/error states, and routes the
- * current selection to the app shell when Ask LLM is chosen.
- *
- * Example:
- *     PDFViewer(fileURL: fileURL) { selection in
- *         handleAskLLM(selection)
- *     }
+ * Displays a PDF with auto-scaling, shows empty/error states, routes the
+ * current selection to the app shell when Ask LLM is chosen, and reports the
+ * currently selected/opened annotation note for rendering.
  *
  * Return: SwiftUI View
  */
@@ -61,6 +60,7 @@ struct PDFViewer: View {}
  * PDFKitContainer - NSViewRepresentable wrapper around PDFKitView
  * @document: PDFDocument instance to render
  * @onAskLLM: Callback invoked for Ask LLM menu action
+ * @onAnnotationSelectionChanged: Callback invoked for annotation note preview
  * @searchQuery: Query string to search in the loaded document
  * @searchMode: Match mode for the query
  */
@@ -69,12 +69,16 @@ struct PDFKitContainer: NSViewRepresentable {}
 /**
  * PDFKitView - PDFView subclass that augments the context menu
  * @onAskLLM: Closure called with the current selection text
+ * @onAnnotationSelectionChanged: Closure called with the resolved note-bearing
+ * annotation selection to preview
  *
  * Adds:
  * - "Annotate Selection" submenu (highlight colors, underline, strikethrough)
  * - "Remove Highlight/Underline/Strikethrough" on annotation right-click
  * - "Add/Edit Note..." and "Remove Note" on annotation right-click
  * - "Ask LLM" on current text selection
+ * - annotation note preview publishing for note markers, grouped markup notes,
+ *   and note entries selected from the highlights sidebar
  * - toolbar-driven PDF search for Any Match and Exact Phrase
  */
 final class PDFKitView: PDFView {}
@@ -98,9 +102,14 @@ struct PDFEmptyState: View {}
   current document back to `documentURL`.
 - `PDFKitView` caches the last search signature and re-runs search only when
   document/query/mode change.
+- `PDFKitView` also resolves the currently selected/opened annotation note into
+  an `AnnotationRenderSelection` so the app shell can render it in the preview
+  panel.
 
 ## Integration Points
 - The `onAskLLM` callback is wired to `AppShellView` to open the chat panel.
+- The `onAnnotationSelectionChanged` callback is wired to `AppShellView` to
+  update the right-side annotation preview panel.
 - The file URL is provided by the file importer in the app shell.
 - Toolbar highlight actions post a `PDFAnnotationAction` notification that the
   active PDF view applies to the current selection.
@@ -110,15 +119,8 @@ struct PDFEmptyState: View {}
   `PDFKitView`, which executes synchronous document search via PDFKit.
 - App shell sidebar state (`sidebarMode`) is passed to `PDFReaderContainerView`
   to switch between hidden/thumbnails/table-of-contents/highlights/bookmarks.
-- Search mode behavior:
-  - `Any Match`: query is tokenized by whitespace and matches any token.
-  - `Exact Phrase`: query is matched as one phrase.
-- All matched search results are highlighted in yellow.
-- Initial search focus jumps to the nearest match to the currently visible page
-  (and current viewport anchor on that page).
-- Search navigation behavior:
-  - `Enter`: move focus to next match.
-  - `Shift+Enter`: move focus to previous match.
+- Clicking an entry in the `Highlights and Notes` sidebar also publishes its
+  resolved note text to the preview pipeline when a note exists.
 
 ## Thumbnail Sidebar Behavior
 - `Thumbnails` mode is implemented with `PDFThumbnailView`, which is sensitive to
@@ -167,6 +169,9 @@ struct PDFEmptyState: View {}
   that group exposes `Remove Note` rather than `Add Note`.
 - Removing a note from a grouped highlight clears the related note marker,
   popup, and sidebar note state for the whole grouped highlight.
+- Clicking directly on a note marker or markup annotation in the PDF view
+  publishes the corresponding note text to the preview panel when note content
+  exists.
 
 ## Known Issues / TODO
 - `Thumbnails` mode intentionally favors visual stability over live-resize
@@ -176,14 +181,15 @@ struct PDFEmptyState: View {}
 
 ## Usage Examples
 ```swift
-PDFViewer(fileURL: fileURL) { selection in
-    handleAskLLM(selection)
-}
-```
-
-```swift
 HSplitView {
-    PDFViewer(fileURL: fileURL, onAskLLM: handleAskLLM)
+    PDFViewer(
+        fileURL: fileURL,
+        onAskLLM: handleAskLLM,
+        onAnnotationSelectionChanged: handleAnnotationSelectionChanged,
+        searchQuery: searchQuery,
+        searchMode: searchMode,
+        sidebarMode: selectedPDFSidebarMode
+    )
     ChatPanel(selectionText: selectionText, onClose: closeChat)
 }
 ```
