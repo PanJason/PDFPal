@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import MathJaxSwift
 
@@ -19,7 +18,7 @@ final class RenderPipeline: RenderPipelineServing {
         case .html:
             let body = content.isTrusted ? content.source : sanitizedHTMLBody(from: content.source)
             return RenderResult(
-                html: htmlDocument(body: body),
+                html: htmlDocument(body: body, additionalStyles: ""),
                 warnings: content.isTrusted ? [] : [RenderWarning(message: "HTML input was sanitized before rendering.")]
             )
         case .markdown:
@@ -31,19 +30,7 @@ final class RenderPipeline: RenderPipelineServing {
         let extraction = extractMathTokens(from: content.source)
         var warnings = extraction.warnings
 
-        let bodyHTML: String
-        do {
-            bodyHTML = try markdownBodyHTML(from: extraction.markdown)
-        } catch {
-            warnings.append(RenderWarning(message: "Markdown conversion failed. Falling back to plain text preview."))
-            let escaped = escapeHTML(content.source)
-            return RenderResult(
-                html: htmlDocument(body: "<pre>\(escaped)</pre>"),
-                warnings: warnings
-            )
-        }
-
-        var renderedHTML = bodyHTML
+        var renderedHTML = markdownBodyHTML(from: extraction.markdown)
         for fragment in extraction.fragments {
             let conversion = await mathRenderer.render(fragment.source, display: fragment.display)
             warnings.append(contentsOf: conversion.warnings)
@@ -61,35 +48,13 @@ final class RenderPipeline: RenderPipelineServing {
         }
 
         return RenderResult(
-            html: htmlDocument(body: renderedHTML),
+            html: htmlDocument(body: renderedHTML, additionalStyles: ""),
             warnings: warnings
         )
     }
 
-    private func markdownBodyHTML(from markdown: String) throws -> String {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .full,
-            failurePolicy: .returnPartiallyParsedIfPossible
-        )
-        let attributed = try AttributedString(markdown: markdown, options: options)
-        let nsAttributed = NSAttributedString(attributed)
-        let range = NSRange(location: 0, length: nsAttributed.length)
-        let data = try nsAttributed.data(
-            from: range,
-            documentAttributes: [.documentType: NSAttributedString.DocumentType.html]
-        )
-        let html = String(data: data, encoding: .utf8) ?? "<p>\(escapeHTML(markdown))</p>"
-        return extractBody(fromHTMLDocument: html)
-    }
-
-    private func extractBody(fromHTMLDocument html: String) -> String {
-        guard let bodyStartRange = html.range(of: "<body[^>]*>", options: .regularExpression),
-              let bodyEndRange = html.range(of: "</body>", options: .caseInsensitive)
-        else {
-            return html
-        }
-
-        return String(html[bodyStartRange.upperBound..<bodyEndRange.lowerBound])
+    private func markdownBodyHTML(from markdown: String) -> String {
+        SimpleMarkdownRenderer.render(markdown)
     }
 
     private func sanitizedHTMLBody(from html: String) -> String {
@@ -100,7 +65,7 @@ final class RenderPipeline: RenderPipelineServing {
         )
     }
 
-    private func htmlDocument(body: String) -> String {
+    private func htmlDocument(body: String, additionalStyles: String) -> String {
         """
         <!doctype html>
         <html>
@@ -196,11 +161,260 @@ final class RenderPipeline: RenderPipelineServing {
             border-radius: 6px;
             padding: 6px 8px;
         }
+        \(additionalStyles)
         </style>
         </head>
         <body>\(body)</body>
         </html>
         """
+    }
+}
+
+private enum MarkdownListType {
+    case unordered
+    case ordered
+}
+
+private enum SimpleMarkdownRenderer {
+    static func render(_ markdown: String) -> String {
+        let lines = markdown.components(separatedBy: "\n")
+        var htmlBlocks: [String] = []
+        var paragraphLines: [String] = []
+        var blockquoteLines: [String] = []
+        var listItems: [String] = []
+        var activeListType: MarkdownListType?
+        var activeFence: String?
+        var fencedCodeLines: [String] = []
+        var fencedCodeLanguage = ""
+
+        func flushParagraph() {
+            guard !paragraphLines.isEmpty else { return }
+            let rendered = paragraphLines
+                .map(renderInline)
+                .joined(separator: "<br>")
+            htmlBlocks.append("<p>\(rendered)</p>")
+            paragraphLines.removeAll()
+        }
+
+        func flushBlockquote() {
+            guard !blockquoteLines.isEmpty else { return }
+            let rendered = blockquoteLines
+                .map(renderInline)
+                .joined(separator: "<br>")
+            htmlBlocks.append("<blockquote><p>\(rendered)</p></blockquote>")
+            blockquoteLines.removeAll()
+        }
+
+        func flushList() {
+            guard !listItems.isEmpty, let activeListType else { return }
+            let tag = activeListType == .ordered ? "ol" : "ul"
+            let items = listItems.map { "<li>\($0)</li>" }.joined()
+            htmlBlocks.append("<\(tag)>\(items)</\(tag)>")
+            listItems.removeAll()
+            selfResetList()
+        }
+
+        func selfResetList() {
+            activeListType = nil
+        }
+
+        func flushCodeBlock() {
+            guard activeFence != nil else { return }
+            let escaped = escapeHTML(fencedCodeLines.joined(separator: "\n"))
+            let classAttribute = fencedCodeLanguage.isEmpty ? "" : " class=\"language-\(escapeHTML(fencedCodeLanguage))\""
+            htmlBlocks.append("<pre><code\(classAttribute)>\(escaped)</code></pre>")
+            activeFence = nil
+            fencedCodeLines.removeAll()
+            fencedCodeLanguage = ""
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let activeFence {
+                if trimmed == activeFence {
+                    flushCodeBlock()
+                } else {
+                    fencedCodeLines.append(line)
+                }
+                continue
+            }
+
+            if let fence = openingFence(in: trimmed) {
+                flushParagraph()
+                flushBlockquote()
+                flushList()
+                activeFence = fence
+                fencedCodeLanguage = String(
+                    trimmed.dropFirst(fence.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+                continue
+            }
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                flushBlockquote()
+                flushList()
+                continue
+            }
+
+            if let heading = headingInfo(in: line) {
+                flushParagraph()
+                flushBlockquote()
+                flushList()
+                htmlBlocks.append("<h\(heading.level)>\(renderInline(heading.content))</h\(heading.level)>")
+                continue
+            }
+
+            if let blockquote = blockquoteLine(in: line) {
+                flushParagraph()
+                flushList()
+                blockquoteLines.append(blockquote)
+                continue
+            }
+
+            if let listItem = listItemInfo(in: line) {
+                flushParagraph()
+                flushBlockquote()
+                if activeListType != nil, activeListType != listItem.type {
+                    flushList()
+                }
+                activeListType = listItem.type
+                listItems.append(renderInline(listItem.content))
+                continue
+            }
+
+            flushBlockquote()
+            flushList()
+            paragraphLines.append(line)
+        }
+
+        if activeFence != nil {
+            flushCodeBlock()
+        }
+        flushParagraph()
+        flushBlockquote()
+        flushList()
+
+        return htmlBlocks.joined(separator: "\n")
+    }
+
+    private static func renderInline(_ source: String) -> String {
+        let codeExtraction = replaceMatches(
+            in: source,
+            pattern: "`([^`]+)`"
+        ) { groups in
+            let code = groups.count > 1 ? groups[1] : groups[0]
+            return "<code>\(escapeHTML(code))</code>"
+        }
+
+        var html = escapeHTML(codeExtraction.text)
+        html = replaceLinks(in: html)
+        html = replaceRegex(in: html, pattern: "\\*\\*(.+?)\\*\\*", template: "<strong>$1</strong>")
+        html = replaceRegex(in: html, pattern: "\\*(.+?)\\*", template: "<em>$1</em>")
+        html = restorePlaceholders(codeExtraction.placeholders, in: html)
+        return html
+    }
+
+    private static func replaceLinks(in source: String) -> String {
+        replaceRegex(
+            in: source,
+            pattern: "\\[([^\\]]+)\\]\\(([^\\)]+)\\)",
+            template: "<a href=\"$2\">$1</a>"
+        )
+    }
+
+    private static func replaceRegex(in source: String, pattern: String, template: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return source
+        }
+        let range = NSRange(location: 0, length: (source as NSString).length)
+        return regex.stringByReplacingMatches(in: source, options: [], range: range, withTemplate: template)
+    }
+
+    private static func replaceMatches(
+        in source: String,
+        pattern: String,
+        replacement: ([String]) -> String
+    ) -> (text: String, placeholders: [String: String]) {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return (source, [:])
+        }
+
+        let nsSource = source as NSString
+        let matches = regex.matches(in: source, options: [], range: NSRange(location: 0, length: nsSource.length))
+        guard !matches.isEmpty else {
+            return (source, [:])
+        }
+
+        var placeholders: [String: String] = [:]
+        var result = source
+
+        for (index, match) in matches.enumerated().reversed() {
+            let fullRange = match.range(at: 0)
+            guard fullRange.location != NSNotFound else { continue }
+
+            var groups: [String] = []
+            for groupIndex in 0..<match.numberOfRanges {
+                let groupRange = match.range(at: groupIndex)
+                guard groupRange.location != NSNotFound else {
+                    groups.append("")
+                    continue
+                }
+                groups.append(nsSource.substring(with: groupRange))
+            }
+
+            let placeholder = "PDFPAL_INLINE_PLACEHOLDER_\(index)_TOKEN"
+            placeholders[placeholder] = replacement(groups)
+            if let range = Range(fullRange, in: result) {
+                result.replaceSubrange(range, with: placeholder)
+            }
+        }
+
+        return (result, placeholders)
+    }
+
+    private static func restorePlaceholders(_ placeholders: [String: String], in source: String) -> String {
+        placeholders.reduce(source) { partialResult, entry in
+            partialResult.replacingOccurrences(of: entry.key, with: entry.value)
+        }
+    }
+
+    private static func headingInfo(in line: String) -> (level: Int, content: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let hashes = trimmed.prefix { $0 == "#" }
+        let level = hashes.count
+        guard level > 0, level <= 6 else { return nil }
+
+        let afterHashes = trimmed.dropFirst(level)
+        guard afterHashes.first == " " else { return nil }
+        return (level, String(afterHashes.dropFirst()))
+    }
+
+    private static func blockquoteLine(in line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix(">") else { return nil }
+        return String(trimmed.dropFirst().trimmingCharacters(in: .whitespaces))
+    }
+
+    private static func listItemInfo(in line: String) -> (type: MarkdownListType, content: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
+            return (.unordered, String(trimmed.dropFirst(2)))
+        }
+
+        let pattern = #"^(\d+)[\.\)]\s+(.+)$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return nil
+        }
+        let nsLine = trimmed as NSString
+        let range = NSRange(location: 0, length: nsLine.length)
+        guard let match = regex.firstMatch(in: trimmed, options: [], range: range),
+              match.numberOfRanges > 2
+        else {
+            return nil
+        }
+        return (.ordered, nsLine.substring(with: match.range(at: 2)))
     }
 }
 
