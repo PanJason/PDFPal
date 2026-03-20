@@ -7,6 +7,8 @@ struct AnnotationPreviewPanel: View {
 
     @State private var renderResult: RenderResult = .empty
     @State private var isRendering = false
+    @State private var isStale = false
+    @State private var lastRenderedIdentity: String = "none"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,13 +18,33 @@ struct AnnotationPreviewPanel: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .task(id: renderKey) {
-            await renderSelection()
+            await renderWithDebounce()
         }
+    }
+
+    // Changes to the annotation identity (page, bounds) trigger an immediate render.
+    // Changes to rawText only (live note editing) sleep 800 ms so we don't render on
+    // every keystroke; the task is cancelled and restarted whenever the text changes
+    // again, resetting the timer automatically.
+    private func renderWithDebounce() async {
+        let currentIdentity = annotationIdentityKey
+        if currentIdentity == lastRenderedIdentity && selection != nil {
+            isStale = true
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+        }
+        isStale = false
+        await renderSelection()
+    }
+
+    private var annotationIdentityKey: String {
+        guard let selection else { return "none" }
+        return "\(selection.documentPath)|\(selection.pageIndex)|\(selection.annotationBounds.debugDescription)"
     }
 
     private var renderKey: String {
         guard let selection else { return "none" }
-        return "\(selection.documentPath)|\(selection.pageIndex)|\(selection.annotationBounds.debugDescription)|\(selection.rawText)"
+        return "\(annotationIdentityKey)|\(selection.rawText)"
     }
 
     private var header: some View {
@@ -58,10 +80,10 @@ struct AnnotationPreviewPanel: View {
     private var content: some View {
         if let selection {
             VStack(spacing: 0) {
-                if isRendering {
+                if isRendering && !isStale {
                     ProgressView("Rendering note...")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if renderResult.html.isEmpty {
+                } else if renderResult.html.isEmpty && !isStale {
                     previewEmptyState(
                         title: "Nothing to render",
                         message: "The selected annotation note is empty."
@@ -74,6 +96,8 @@ struct AnnotationPreviewPanel: View {
                         result: renderResult,
                         baseURL: URL(fileURLWithPath: selection.documentPath).deletingLastPathComponent()
                     )
+                    .opacity(isStale ? 0.45 : 1.0)
+                    .animation(.easeInOut(duration: 0.15), value: isStale)
                 }
             }
         } else {
@@ -113,6 +137,7 @@ struct AnnotationPreviewPanel: View {
 
     @MainActor
     private func renderSelection() async {
+        lastRenderedIdentity = annotationIdentityKey
         guard let selection else {
             renderResult = .empty
             isRendering = false

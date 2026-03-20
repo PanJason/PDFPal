@@ -1063,6 +1063,12 @@ final class PDFKitView: PDFView {
     private var lastSearchSignature: String = ""
     private var searchMatches: [PDFSelection] = []
     private var currentSearchMatchIndex: Int?
+    // Active-annotation live note polling
+    private var activeAnnotation: PDFAnnotation?
+    private var activeFallbackPage: PDFPage?
+    private var lastPublishedNoteContents: String = ""
+    private var activeAnnotationMonitorTimer: Timer?
+    private var lastPublishedSelectionBase: AnnotationRenderSelection?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1082,6 +1088,7 @@ final class PDFKitView: PDFView {
 
     deinit {
         pendingModeApplyWorkItem?.cancel()
+        activeAnnotationMonitorTimer?.invalidate()
         if let annotationObserver {
             NotificationCenter.default.removeObserver(annotationObserver)
         }
@@ -2471,18 +2478,104 @@ final class PDFKitView: PDFView {
 
     private func publishAnnotationSelection(for annotation: PDFAnnotation?, fallbackPage: PDFPage?) {
         guard let target = resolvedAnnotationRenderTarget(for: annotation, fallbackPage: fallbackPage) else {
+            activeAnnotation = nil
+            activeFallbackPage = nil
+            lastPublishedNoteContents = ""
+            lastPublishedSelectionBase = nil
+            stopActiveAnnotationMonitoring()
             onAnnotationSelectionChanged?(nil)
             return
         }
+        activeAnnotation = annotation
+        activeFallbackPage = fallbackPage
+        lastPublishedNoteContents = target.rawText
         let documentPath = document?.documentURL?.path ?? ""
         let pageIndex = document.flatMap { $0.index(for: target.page) } ?? 0
+        let selection = AnnotationRenderSelection(
+            documentPath: documentPath,
+            pageIndex: pageIndex,
+            annotationBounds: target.bounds,
+            rawText: target.rawText,
+            authorName: target.authorName
+        )
+        lastPublishedSelectionBase = selection
+        startActiveAnnotationMonitoring()
+        onAnnotationSelectionChanged?(selection)
+    }
+
+    private func startActiveAnnotationMonitoring() {
+        guard activeAnnotationMonitorTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
+            self?.pollActiveAnnotationNote()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        activeAnnotationMonitorTimer = timer
+    }
+
+    private func stopActiveAnnotationMonitoring() {
+        activeAnnotationMonitorTimer?.invalidate()
+        activeAnnotationMonitorTimer = nil
+    }
+
+    // Returns the live string from whichever NSTextView PDFKit is using to
+    // edit the annotation note right now.  PDFKit may open a floating popup
+    // window (different NSWindow) or edit inline inside the PDFView itself.
+    private func liveEditingText() -> String? {
+        // Floating popup: PDFKit opens a separate NSWindow/NSPanel for the note.
+        if let keyWindow = NSApp.keyWindow,
+           keyWindow !== self.window,
+           let textView = keyWindow.firstResponder as? NSTextView {
+            return textView.string
+        }
+        // Inline editing: the editor NSTextView is a descendant of this PDFView.
+        if let textView = self.window?.firstResponder as? NSTextView,
+           textView.isDescendant(of: self) {
+            return textView.string
+        }
+        return nil
+    }
+
+    private func pollActiveAnnotationNote() {
+        guard let annotation = activeAnnotation else {
+            stopActiveAnnotationMonitoring()
+            return
+        }
+        // While the PDFKit popup/inline editor is open, read live text from the
+        // first responder — annotation.contents is only committed on popup close.
+        if let live = liveEditingText() {
+            publishNoteContentsUpdate(live)
+            return
+        }
+        // Popup is closed — fall back to committed annotation.contents.
+        guard let target = resolvedAnnotationRenderTarget(for: annotation, fallbackPage: activeFallbackPage) else {
+            return
+        }
+        guard target.rawText != lastPublishedNoteContents else { return }
+        lastPublishedNoteContents = target.rawText
+        let documentPath = document?.documentURL?.path ?? ""
+        let pageIndex = document.flatMap { $0.index(for: target.page) } ?? 0
+        let selection = AnnotationRenderSelection(
+            documentPath: documentPath,
+            pageIndex: pageIndex,
+            annotationBounds: target.bounds,
+            rawText: target.rawText,
+            authorName: target.authorName
+        )
+        lastPublishedSelectionBase = selection
+        onAnnotationSelectionChanged?(selection)
+    }
+
+    private func publishNoteContentsUpdate(_ text: String) {
+        guard let base = lastPublishedSelectionBase,
+              text != lastPublishedNoteContents else { return }
+        lastPublishedNoteContents = text
         onAnnotationSelectionChanged?(
             AnnotationRenderSelection(
-                documentPath: documentPath,
-                pageIndex: pageIndex,
-                annotationBounds: target.bounds,
-                rawText: target.rawText,
-                authorName: target.authorName
+                documentPath: base.documentPath,
+                pageIndex: base.pageIndex,
+                annotationBounds: base.annotationBounds,
+                rawText: text,
+                authorName: base.authorName
             )
         )
     }
