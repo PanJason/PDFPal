@@ -1751,6 +1751,9 @@ final class PDFKitView: PDFView {
         let targetPage = contextMenuPage ?? contextMenuAnnotation?.page ?? currentPage
         let targetMarkup = contextMenuAnnotation
 
+        // Ensure the PDFView is first responder before dispatching _addNote: so the
+        // action reaches PDFKit regardless of what held focus before the right-click.
+        window?.makeFirstResponder(self)
         _ = NSApp.sendAction(NSSelectorFromString("_addNote:"), to: nil, from: sender)
 
         DispatchQueue.main.async { [weak self] in
