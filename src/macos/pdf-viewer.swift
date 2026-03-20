@@ -2728,10 +2728,21 @@ final class PDFKitView: PDFView {
         }
 
         for candidate in page.annotations {
-            if let parent = candidate.value(forAnnotationKey: .parent) as? PDFAnnotation {
-                if parent === target || annotationsLikelySame(parent, target) {
-                    toRemove.append(candidate)
-                }
+            guard candidate !== target else { continue }
+            let parentRef = candidate.value(forAnnotationKey: .parent) as? PDFAnnotation
+            let popupRef  = candidate.value(forAnnotationKey: .popup)  as? PDFAnnotation
+            // Notes can be linked to their parent markup via .parent (app-created markers) or
+            // via .popup (system _addNote: notes). Both cases must be caught here, mirroring
+            // the same dual-check already used in normalizeRelatedNoteColors.
+            let linkedViaParent = parentRef.map { $0 === target || annotationsLikelySame($0, target) } == true
+            let linkedViaPopup  = popupRef.map  { $0 === target || annotationsLikelySame($0, target) } == true
+            guard linkedViaParent || linkedViaPopup else { continue }
+            toRemove.append(candidate)
+            // Also remove this child's own popup window (e.g. the floating note editor
+            // attached to a text/note-icon annotation).
+            if let childPopup = candidate.value(forAnnotationKey: .popup) as? PDFAnnotation,
+               childPopup !== target {
+                toRemove.append(childPopup)
             }
         }
 
