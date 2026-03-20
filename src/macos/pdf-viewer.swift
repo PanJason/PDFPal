@@ -541,8 +541,32 @@ final class PDFReaderContainerView: NSView {
     }
 
     private func sidebarExcerpt(for annotations: [PDFAnnotation], on page: PDFPage) -> String {
-        let fragments = annotations.compactMap { annotation in
-            page.selection(for: annotation.bounds)?
+        let fragments = annotations.compactMap { annotation -> String? in
+            // When a single annotation covers multiple lines via quadrilateralPoints,
+            // extract text per quad rect so we only capture the highlighted portions,
+            // not the full union bounding box (which would include non-highlighted text).
+            if let quadValues = annotation.quadrilateralPoints,
+               quadValues.count >= 8, quadValues.count % 4 == 0 {
+                // Quad points are stored relative to the annotation's bounds.origin,
+                // so translate back to absolute page coordinates before querying text.
+                let ox = annotation.bounds.minX
+                let oy = annotation.bounds.minY
+                let pts = quadValues.map { $0.pointValue }
+                let lineTexts = stride(from: 0, to: pts.count, by: 4).compactMap { i -> String? in
+                    // Quad order: top-left, top-right, bottom-left, bottom-right.
+                    let minX = min(pts[i].x, pts[i + 2].x) + ox
+                    let maxX = max(pts[i + 1].x, pts[i + 3].x) + ox
+                    let minY = min(pts[i + 2].y, pts[i + 3].y) + oy
+                    let maxY = max(pts[i].y, pts[i + 1].y) + oy
+                    let rect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+                    return page.selection(for: rect)?
+                        .string?
+                        .replacingOccurrences(of: "\n", with: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }.filter { !$0.isEmpty }
+                return lineTexts.isEmpty ? nil : lineTexts.joined(separator: " ")
+            }
+            return page.selection(for: annotation.bounds)?
                 .string?
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2036,19 +2060,53 @@ final class PDFKitView: PDFView {
             return
         }
 
-        let groupID = UUID().uuidString
-        var addedAny = false
+        // Group line rects by page in document order, then create one annotation per page
+        // with quadrilateralPoints encoding each line rect. This matches how Preview creates
+        // multi-line highlights (one annotation, multiple quads) so that other PDF readers
+        // show a single sidebar entry per highlight instead of one entry per line.
+        var pageOrder: [PDFPage] = []
+        var lineRectsByPage: [ObjectIdentifier: (page: PDFPage, rects: [CGRect])] = [:]
+
         for lineSelection in lineSelections {
             guard let page = lineSelection.pages.first else { continue }
             let bounds = lineSelection.bounds(for: page)
-            if bounds.isNull || bounds.isInfinite || bounds.isEmpty {
+            guard !bounds.isNull, !bounds.isInfinite, !bounds.isEmpty else { continue }
+            let pageID = ObjectIdentifier(page)
+            if lineRectsByPage[pageID] == nil {
+                lineRectsByPage[pageID] = (page: page, rects: [])
+                pageOrder.append(page)
+            }
+            lineRectsByPage[pageID]!.rects.append(bounds)
+        }
+
+        var addedAny = false
+        for page in pageOrder {
+            guard let entry = lineRectsByPage[ObjectIdentifier(page)] else { continue }
+            let lineRects = entry.rects
+            let unionBounds = lineRects.dropFirst().reduce(lineRects[0]) { $0.union($1) }
+
+            if hasEquivalentAnnotation(on: page, action: action, bounds: unionBounds) {
                 continue
             }
-            if hasEquivalentAnnotation(on: page, action: action, bounds: bounds) {
-                continue
+
+            let annotation = makeAnnotation(for: action, bounds: unionBounds)
+
+            // Store per-line quad points when multiple lines are highlighted so only
+            // the individual text lines are visually highlighted, not the whole union rect.
+            // PDFKit interprets quadrilateralPoints relative to the annotation's bounds.origin,
+            // not as absolute page coordinates, so subtract the origin before storing.
+            // PDF quad point order: top-left, top-right, bottom-left, bottom-right.
+            if lineRects.count > 1 {
+                let ox = unionBounds.minX
+                let oy = unionBounds.minY
+                annotation.quadrilateralPoints = lineRects.flatMap { rect -> [NSValue] in [
+                    NSValue(point: NSPoint(x: rect.minX - ox, y: rect.maxY - oy)),
+                    NSValue(point: NSPoint(x: rect.maxX - ox, y: rect.maxY - oy)),
+                    NSValue(point: NSPoint(x: rect.minX - ox, y: rect.minY - oy)),
+                    NSValue(point: NSPoint(x: rect.maxX - ox, y: rect.minY - oy)),
+                ]}
             }
-            let annotation = makeAnnotation(for: action, bounds: bounds)
-            setMarkupGroupID(groupID, on: annotation)
+
             page.addAnnotation(annotation)
             addedAny = true
         }
