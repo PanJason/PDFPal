@@ -546,6 +546,16 @@ struct ChatPanel: View {
                 keychainAccount: base.keychainAccount
             )
             return GeminiStreamingClient(configuration: config)
+        case .qwen:
+            let base = QwenClientConfiguration.load()
+            let config = QwenClientConfiguration(
+                endpoint: base.endpoint,
+                model: modelId,
+                timeout: base.timeout,
+                keychainService: base.keychainService,
+                keychainAccount: base.keychainAccount
+            )
+            return QwenStreamingClient(configuration: config)
         }
     }
 
@@ -611,6 +621,12 @@ struct ChatPanel: View {
                 KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
                 EnvironmentAPIKeyProvider(environmentKey: model.provider.environmentKey)
             ])
+        case .qwen:
+            let config = QwenClientConfiguration.load()
+            return CompositeAPIKeyProvider(providers: [
+                KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
+                EnvironmentAPIKeyProvider(environmentKey: model.provider.environmentKey)
+            ])
         }
     }
 
@@ -624,6 +640,9 @@ struct ChatPanel: View {
             return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
         case .gemini:
             let config = GeminiClientConfiguration.load()
+            return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
+        case .qwen:
+            let config = QwenClientConfiguration.load()
             return KeychainAPIKeyStore(service: config.keychainService, account: config.keychainAccount)
         }
     }
@@ -1123,6 +1142,7 @@ struct SessionSidebar: View {
 enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
     case openAI
     case claude
+    case qwen
     case gemini
 
     var id: String { rawValue }
@@ -1135,6 +1155,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
             return "Claude"
         case .gemini:
             return "Gemini"
+        case .qwen:
+            return "Qwen"
         }
     }
 
@@ -1146,6 +1168,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
             return "ANTHROPIC_API_KEY"
         case .gemini:
             return "GEMINI_API_KEY"
+        case .qwen:
+            return "QWEN_API_KEY"
         }
     }
 
@@ -1157,6 +1181,8 @@ enum LLMProvider: String, CaseIterable, Identifiable, Hashable, Codable {
             return "ANTHROPIC_API_KEY"
         case .gemini:
             return "GEMINI_API_KEY"
+        case .qwen:
+            return "QWEN_API_KEY"
         }
     }
 }
@@ -1272,6 +1298,41 @@ struct LLMModel: Identifiable, Hashable, Codable {
         )
     ]
 
+    static let defaultQwen = LLMModel(
+        id: "qwen-max",
+        displayName: "Qwen Max",
+        provider: .qwen,
+        isCustom: false
+    )
+
+    static let qwenModels: [LLMModel] = [
+        defaultQwen,
+        LLMModel(
+            id: "qwen-plus",
+            displayName: "Qwen Plus",
+            provider: .qwen,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "qwen-turbo",
+            displayName: "Qwen Turbo",
+            provider: .qwen,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "qwen-long",
+            displayName: "Qwen Long",
+            provider: .qwen,
+            isCustom: false
+        ),
+        LLMModel(
+            id: "custom-qwen",
+            displayName: "Custom (Qwen)",
+            provider: .qwen,
+            isCustom: true
+        )
+    ]
+
     static func defaultModel(for provider: LLMProvider) -> LLMModel {
         switch provider {
         case .openAI:
@@ -1280,6 +1341,8 @@ struct LLMModel: Identifiable, Hashable, Codable {
             return defaultClaude
         case .gemini:
             return defaultGemini
+        case .qwen:
+            return defaultQwen
         }
     }
 
@@ -1291,6 +1354,8 @@ struct LLMModel: Identifiable, Hashable, Codable {
             return claudeModels
         case .gemini:
             return geminiModels
+        case .qwen:
+            return qwenModels
         }
     }
 }

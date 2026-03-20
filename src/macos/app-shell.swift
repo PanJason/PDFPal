@@ -73,6 +73,7 @@ struct AppShellView: View {
     @StateObject private var openAISessionStore = SessionStore(provider: .openAI)
     @StateObject private var claudeSessionStore = SessionStore(provider: .claude)
     @StateObject private var geminiSessionStore = SessionStore(provider: .gemini)
+    @StateObject private var qwenSessionStore = SessionStore(provider: .qwen)
     private let renderPipeline = RenderPipeline()
 
     var body: some View {
@@ -213,6 +214,9 @@ struct AppShellView: View {
         .onReceive(geminiSessionStore.$activeSessionId) { _ in
             syncFileURLForActiveSession(in: geminiSessionStore)
         }
+        .onReceive(qwenSessionStore.$activeSessionId) { _ in
+            syncFileURLForActiveSession(in: qwenSessionStore)
+        }
         .onChange(of: selectedProvider) { _ in
             syncFileURLForActiveSession(in: activeSessionStore)
         }
@@ -220,11 +224,13 @@ struct AppShellView: View {
             openAISessionStore.persistNow()
             claudeSessionStore.persistNow()
             geminiSessionStore.persistNow()
+            qwenSessionStore.persistNow()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             openAISessionStore.persistNow()
             claudeSessionStore.persistNow()
             geminiSessionStore.persistNow()
+            qwenSessionStore.persistNow()
         }
         .onReceive(NotificationCenter.default.publisher(for: .pdfHighlighterModeChanged)) { notification in
             if let enabled = notification.object as? Bool {
@@ -294,6 +300,8 @@ struct AppShellView: View {
             return claudeSessionStore
         case .gemini:
             return geminiSessionStore
+        case .qwen:
+            return qwenSessionStore
         }
     }
 
@@ -371,6 +379,12 @@ struct AppShellView: View {
             ])
         case .gemini:
             let config = GeminiClientConfiguration.load()
+            return CompositeAPIKeyProvider(providers: [
+                KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
+                EnvironmentAPIKeyProvider(environmentKey: provider.environmentKey)
+            ])
+        case .qwen:
+            let config = QwenClientConfiguration.load()
             return CompositeAPIKeyProvider(providers: [
                 KeychainAPIKeyProvider(service: config.keychainService, account: config.keychainAccount),
                 EnvironmentAPIKeyProvider(environmentKey: provider.environmentKey)
@@ -490,6 +504,15 @@ struct AppShellView: View {
                 selectionText: selectionText,
                 openPDFPath: fileURL?.path,
                 sessionStore: geminiSessionStore,
+                isSessionSidebarVisible: $isSessionSidebarVisible,
+                onClose: { isChatVisible = false }
+            )
+        case .qwen:
+            QwenLLMChatServing(
+                documentId: documentId,
+                selectionText: selectionText,
+                openPDFPath: fileURL?.path,
+                sessionStore: qwenSessionStore,
                 isSessionSidebarVisible: $isSessionSidebarVisible,
                 onClose: { isChatVisible = false }
             )
@@ -658,6 +681,26 @@ struct ClaudeLLMChatServing: View {
 }
 
 struct GeminiLLMChatServing: View {
+    let documentId: String
+    let selectionText: String
+    let openPDFPath: String?
+    let sessionStore: SessionStore
+    let isSessionSidebarVisible: Binding<Bool>
+    let onClose: () -> Void
+
+    var body: some View {
+        ChatPanel(
+            documentId: documentId,
+            selectionText: selectionText,
+            openPDFPath: openPDFPath,
+            sessionStore: sessionStore,
+            isSessionSidebarVisible: isSessionSidebarVisible,
+            onClose: onClose
+        )
+    }
+}
+
+struct QwenLLMChatServing: View {
     let documentId: String
     let selectionText: String
     let openPDFPath: String?

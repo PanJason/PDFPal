@@ -43,6 +43,8 @@ func makeFileAttachmentClient(for model: LLMModel) -> any LLMFileAttachmentClien
         return ClaudeFileClient(configuration: .load())
     case .gemini:
         return GeminiFileClient(configuration: .load())
+    case .qwen:
+        return NoopFileAttachmentClient()
     }
 }
 
