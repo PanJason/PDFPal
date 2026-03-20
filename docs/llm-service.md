@@ -1,10 +1,11 @@
 # LLM Service Documentation
 
 ## Overview
-The LLM Service provides streaming OpenAI, Claude, and Gemini clients for the
-macOS PoC. It exposes a small `LLMClient` protocol with mock, OpenAI, Claude,
-and Gemini streaming implementations, builds provider-specific requests, and
-emits incremental text deltas for the chat UI to render in real time.
+The LLM Service provides streaming OpenAI, Claude, Gemini, and Qwen clients for
+the macOS PoC. It exposes a small `LLMClient` protocol with mock, OpenAI,
+Claude, Gemini, and Qwen streaming implementations, builds provider-specific
+requests, and emits incremental text deltas for the chat UI to render in real
+time.
 
 ## Public API
 ```swift
@@ -133,6 +134,25 @@ struct GeminiClientConfiguration {}
 struct GeminiStreamingClient {}
 
 /**
+ * QwenClientConfiguration - Alibaba Cloud ModelStudio Chat Completions configuration
+ * @endpoint: Chat Completions endpoint URL (OpenAI-compatible)
+ * @model: Qwen model identifier
+ * @timeout: Request timeout in seconds
+ * @keychainService: Keychain service for API key lookup
+ * @keychainAccount: Keychain account for API key lookup
+ */
+struct QwenClientConfiguration {}
+
+/**
+ * QwenStreamingClient - Qwen client via Alibaba Cloud ModelStudio (OpenAI-compatible)
+ * @configuration: Qwen configuration options
+ * @apiKeyProvider: API key loader (Keychain/env)
+ * @session: URLSession used for network requests
+ * Note: file upload is not supported; LLMRequest.fileID is ignored.
+ */
+struct QwenStreamingClient {}
+
+/**
  * MockLLMClient - In-memory streaming mock for UI and tests
  */
 struct MockLLMClient {}
@@ -150,6 +170,9 @@ inside the call scope.
   `ANTHROPIC_API_KEY` for development.
 - `GeminiStreamingClient` (in `src/macos/llm/gemini-client.swift`) reads the API key from Keychain first, then falls back to
   `GEMINI_API_KEY` for development.
+- `QwenStreamingClient` (in `src/macos/llm/qwen-client.swift`) reads the API key from Keychain first, then falls back to
+  `QWEN_API_KEY` for development. Uses the Alibaba Cloud ModelStudio OpenAI-compatible Chat Completions API;
+  context is sent as a `system` message. File upload is not supported — `LLMRequest.fileID` is ignored.
 - API keys saved from the chat panel are stored in Keychain via `KeychainAPIKeyStore`.
 - Configuration is loaded from environment overrides:
   - OpenAI: `OPENAI_API_ENDPOINT`, `OPENAI_MODEL`, `OPENAI_TIMEOUT`, `OPENAI_KEYCHAIN_SERVICE`, `OPENAI_KEYCHAIN_ACCOUNT`
@@ -157,8 +180,9 @@ inside the call scope.
     `ANTHROPIC_MAX_TOKENS`, `ANTHROPIC_KEYCHAIN_SERVICE`, `ANTHROPIC_KEYCHAIN_ACCOUNT`
   - Gemini: `GEMINI_API_ENDPOINT`, `GEMINI_MODEL`, `GEMINI_TIMEOUT`, `GEMINI_MAX_TOKENS`,
     `GEMINI_KEYCHAIN_SERVICE`, `GEMINI_KEYCHAIN_ACCOUNT`
+  - Qwen: `QWEN_API_ENDPOINT`, `QWEN_MODEL`, `QWEN_TIMEOUT`, `QWEN_KEYCHAIN_SERVICE`, `QWEN_KEYCHAIN_ACCOUNT`
 - The OpenAI Responses API and Claude Messages API are used with streaming
-  events for incremental text rendering, along with the Gemini streaming API.
+  events for incremental text rendering, along with the Gemini and Qwen streaming APIs.
 - OpenAI requests can include an uploaded file through `input_file` content
   blocks when `LLMRequest.fileID` is present.
 - Claude requests can include an uploaded file through `document` content
@@ -171,6 +195,7 @@ inside the call scope.
   `files-api-2025-04-14` beta header and deletes them when sessions are removed.
 - `GeminiFileClient` performs resumable file upload, waits until file state is
   `ACTIVE`, and uses/deletes the returned file URI.
+- Qwen sessions use `NoopFileAttachmentClient`; no file is uploaded or deleted.
 
 ## Usage Examples
 ```swift

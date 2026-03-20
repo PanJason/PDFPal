@@ -2,7 +2,7 @@
 
 ## Overview
 The Session Store keeps chat sessions scoped by model family and persists them
-to disk. Each provider (OpenAI, Claude) has its own `SessionStore`, and the
+to disk. Each provider (OpenAI, Claude, Gemini, Qwen) has its own `SessionStore`, and the
 Chat Panel uses it to manage messages, selected models, and context per
 session. The store backs the session sidebar on the right side of the chat
 panel.

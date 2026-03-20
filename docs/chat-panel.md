@@ -5,7 +5,7 @@ The Chat Panel renders the right-side conversation UI for the macOS app. It
 shows the selected PDF context, a scrollable message list, an input composer,
 and UI states for loading and errors with retry. It includes a model picker,
 API key prompt, per-provider session selection sidebar (OpenAI, Claude,
-Gemini), and streaming updates from the LLM service. A hover-only fold control
+Gemini, Qwen), and streaming updates from the LLM service. A hover-only fold control
 lets the user hide or show the session sidebar.
 
 ## Public API
@@ -116,14 +116,14 @@ struct LLMModel: Identifiable {}
 - `openPDFPath` is used when creating new sessions to associate them with the
   active document.
 - `sessionStore` is provided by `AppShellView` and scoped per model family.
-- Streaming responses use `OpenAIStreamingClient`,
-  `ClaudeStreamingClient`, or `GeminiStreamingClient` from
-  `src/macos/llm/`.
+- Streaming responses use `OpenAIStreamingClient`, `ClaudeStreamingClient`,
+  `GeminiStreamingClient`, or `QwenStreamingClient` from `src/macos/llm/`.
 - For OpenAI, Claude, and Gemini sessions, the panel uploads the session PDF
   to the provider Files API before the first prompt, stores the returned
   `fileID` in the session, and reuses it for later prompts.
 - Deleting an OpenAI, Claude, or Gemini session also attempts to delete its
   uploaded file from the provider Files API.
+- Qwen sessions do not upload files; `LLMRequest.fileID` is always nil for Qwen.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples

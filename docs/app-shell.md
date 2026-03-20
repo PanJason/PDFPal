@@ -6,7 +6,7 @@ lifecycle, and split view layout that hosts the PDF panel, chat panel, and
 annotation preview panel. It handles file selection via the system file
 importer, reveals the chat panel when an Ask LLM action occurs, and reveals the
 annotation preview panel when the user selects or opens a PDF annotation note.
-It also exposes a model family picker (OpenAI, Claude, Gemini) in the toolbar,
+It also exposes a model family picker (OpenAI, Claude, Gemini, Qwen) in the toolbar,
 a PDF annotation menu (highlight/underline/strikethrough), and a view menu that
 toggles the chat panel, session sidebar, annotation preview, and PDF sidebar
 mode. The app delegate also applies the app icon at launch using the bundled
@@ -73,6 +73,18 @@ struct ClaudeLLMChatServing: View {}
 struct GeminiLLMChatServing: View {}
 
 /**
+ * QwenLLMChatServing - Qwen chat panel wrapper
+ * @documentId: Identifier for the open document session
+ * @selectionText: Text selection captured from the PDF viewer
+ * @openPDFPath: File path of the currently opened PDF
+ * @sessionStore: Session store for Qwen sessions
+ * @onClose: Callback when the user closes the chat panel
+ *
+ * Wraps the generic ChatPanel with Qwen defaults.
+ */
+struct QwenLLMChatServing: View {}
+
+/**
  * AnnotationPreviewPanel - Right-side rendered annotation note preview
  * @selection: Current PDF annotation note selection to render
  * @pipeline: Shared render pipeline used to convert Markdown and math to HTML
@@ -110,10 +122,10 @@ struct AnnotationPreviewPanel: View {}
 - Annotation note selection is also provided by `PDFViewer`, which bridges
   PDFKit annotation state into `AnnotationRenderSelection` values for the app
   shell.
-- Chat rendering is provided by `OpenAILLMChatServing` in
-  `src/macos/app-shell.swift` (or `ClaudeLLMChatServing`), which delegates to
-  `ChatPanel` in `src/macos/chat-panel.swift` with the provider-specific
-  `SessionStore`.
+- Chat rendering is provided by `OpenAILLMChatServing`, `ClaudeLLMChatServing`,
+  `GeminiLLMChatServing`, or `QwenLLMChatServing` in `src/macos/app-shell.swift`,
+  each delegating to `ChatPanel` in `src/macos/chat-panel.swift` with the
+  provider-specific `SessionStore`.
 - Annotation note preview rendering is provided by `AnnotationPreviewPanel` in
   `src/macos/notes-panel.swift`, which uses `RenderPipeline` and `RenderView`
   from `src/macos/render/`.
