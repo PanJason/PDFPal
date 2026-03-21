@@ -62,12 +62,14 @@ extension Notification.Name {
     static let pdfFocusSearch = Notification.Name("PDFFocusSearch")
     static let pdfSearchNext = Notification.Name("PDFSearchNext")
     static let pdfSearchPrevious = Notification.Name("PDFSearchPrevious")
+    static let pdfGoToCitationDestination = Notification.Name("PDFGoToCitationDestination")
 }
 
 struct PDFViewer: View {
     let fileURL: URL?
     let onAskLLM: (String) -> Void
     let onAnnotationSelectionChanged: AnnotationSelectionHandler
+    let onCitationSelectionChanged: CitationSelectionHandler
     let searchQuery: String
     let searchMode: PDFSearchMode
     let sidebarMode: PDFSidebarMode
@@ -82,6 +84,7 @@ struct PDFViewer: View {
                     document: document,
                     onAskLLM: onAskLLM,
                     onAnnotationSelectionChanged: onAnnotationSelectionChanged,
+                    onCitationSelectionChanged: onCitationSelectionChanged,
                     searchQuery: searchQuery,
                     searchMode: searchMode,
                     sidebarMode: sidebarMode
@@ -128,6 +131,7 @@ struct PDFKitContainer: NSViewRepresentable {
     let document: PDFDocument
     let onAskLLM: (String) -> Void
     let onAnnotationSelectionChanged: AnnotationSelectionHandler
+    let onCitationSelectionChanged: CitationSelectionHandler
     let searchQuery: String
     let searchMode: PDFSearchMode
     let sidebarMode: PDFSidebarMode
@@ -138,6 +142,7 @@ struct PDFKitContainer: NSViewRepresentable {
             document: document,
             onAskLLM: onAskLLM,
             onAnnotationSelectionChanged: onAnnotationSelectionChanged,
+            onCitationSelectionChanged: onCitationSelectionChanged,
             searchQuery: searchQuery,
             searchMode: searchMode,
             sidebarMode: sidebarMode
@@ -150,6 +155,7 @@ struct PDFKitContainer: NSViewRepresentable {
             document: document,
             onAskLLM: onAskLLM,
             onAnnotationSelectionChanged: onAnnotationSelectionChanged,
+            onCitationSelectionChanged: onCitationSelectionChanged,
             searchQuery: searchQuery,
             searchMode: searchMode,
             sidebarMode: sidebarMode
@@ -225,6 +231,7 @@ final class PDFReaderContainerView: NSView {
         document: PDFDocument,
         onAskLLM: @escaping (String) -> Void,
         onAnnotationSelectionChanged: @escaping AnnotationSelectionHandler,
+        onCitationSelectionChanged: @escaping CitationSelectionHandler,
         searchQuery: String,
         searchMode: PDFSearchMode,
         sidebarMode: PDFSidebarMode
@@ -239,6 +246,7 @@ final class PDFReaderContainerView: NSView {
 
         pdfView.onAskLLM = onAskLLM
         pdfView.onAnnotationSelectionChanged = onAnnotationSelectionChanged
+        pdfView.onCitationSelectionChanged = onCitationSelectionChanged
         pdfView.updateSearch(query: searchQuery, mode: searchMode)
 
         if documentChanged || sidebarMode != currentSidebarMode {
@@ -1045,6 +1053,7 @@ final class PDFKitView: PDFView {
 
     var onAskLLM: ((String) -> Void)?
     var onAnnotationSelectionChanged: AnnotationSelectionHandler?
+    var onCitationSelectionChanged: CitationSelectionHandler?
     private var lastSelectionText: String = ""
     private var contextMenuAnnotation: PDFAnnotation?
     private var contextMenuPage: PDFPage?
@@ -1055,6 +1064,7 @@ final class PDFKitView: PDFView {
     private var saveObserver: NSObjectProtocol?
     private var searchNextObserver: NSObjectProtocol?
     private var searchPreviousObserver: NSObjectProtocol?
+    private var citationNavigationObserver: NSObjectProtocol?
     private var pendingModeApplyWorkItem: DispatchWorkItem?
     private var currentAnnotationAction: PDFAnnotationAction = .highlightYellow
     private var isHighlighterModeEnabled = false
@@ -1076,6 +1086,7 @@ final class PDFKitView: PDFView {
         registerSelectionObserver()
         registerSaveObserver()
         registerSearchNavigationObservers()
+        registerCitationNavigationObserver()
     }
 
     required init?(coder: NSCoder) {
@@ -1084,6 +1095,7 @@ final class PDFKitView: PDFView {
         registerSelectionObserver()
         registerSaveObserver()
         registerSearchNavigationObservers()
+        registerCitationNavigationObserver()
     }
 
     deinit {
@@ -1107,6 +1119,9 @@ final class PDFKitView: PDFView {
         if let searchPreviousObserver {
             NotificationCenter.default.removeObserver(searchPreviousObserver)
         }
+        if let citationNavigationObserver {
+            NotificationCenter.default.removeObserver(citationNavigationObserver)
+        }
     }
 
     override func setCurrentSelection(_ selection: PDFSelection?, animate: Bool) {
@@ -1114,8 +1129,18 @@ final class PDFKitView: PDFView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        super.mouseUp(with: event)
         let clickedAnnotation = annotation(at: event)
+        if let citationSelection = resolvedCitationLinkSelection(
+            for: clickedAnnotation,
+            fallbackPage: contextMenuPage
+        ) {
+            publishAnnotationSelection(for: nil, fallbackPage: nil)
+            onCitationSelectionChanged?(citationSelection)
+            return
+        }
+
+        super.mouseUp(with: event)
+        onCitationSelectionChanged?(nil)
         publishAnnotationSelection(for: clickedAnnotation, fallbackPage: contextMenuPage)
     }
 
@@ -1851,6 +1876,17 @@ final class PDFKitView: PDFView {
         }
     }
 
+    private func registerCitationNavigationObserver() {
+        citationNavigationObserver = NotificationCenter.default.addObserver(
+            forName: .pdfGoToCitationDestination,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let selection = note.object as? CitationLinkSelection else { return }
+            self?.goToCitationDestination(selection)
+        }
+    }
+
     private func registerSelectionObserver() {
         selectionChangedObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name.PDFViewSelectionChanged,
@@ -1911,6 +1947,17 @@ final class PDFKitView: PDFView {
         let bounds: CGRect
         let rawText: String
         let authorName: String?
+    }
+
+    private struct ResolvedCitationLinkTarget {
+        let sourcePage: PDFPage
+        let sourceBounds: CGRect
+        let labelText: String
+        let kind: CitationLinkKind
+        let destinationPage: PDFPage?
+        let destinationPoint: CGPoint?
+        let externalURL: URL?
+        let referenceText: String?
     }
 
     private func contextMarkupNoteTarget() -> MarkupNoteTarget? {
@@ -2583,6 +2630,51 @@ final class PDFKitView: PDFView {
         )
     }
 
+    private func goToCitationDestination(_ selection: CitationLinkSelection) {
+        guard let document,
+              document.documentURL?.path == selection.documentPath,
+              let destinationPageIndex = selection.destinationPageIndex,
+              let page = document.page(at: destinationPageIndex)
+        else {
+            return
+        }
+
+        if let point = selection.destinationPoint {
+            go(to: PDFDestination(page: page, at: point))
+        } else {
+            go(to: page)
+        }
+    }
+
+    private func resolvedCitationLinkSelection(
+        for annotation: PDFAnnotation?,
+        fallbackPage: PDFPage?
+    ) -> CitationLinkSelection? {
+        guard let target = resolvedCitationLinkTarget(for: annotation, fallbackPage: fallbackPage),
+              looksLikeCitationLabel(target.labelText)
+        else {
+            return nil
+        }
+
+        let documentPath = document?.documentURL?.path ?? ""
+        let sourcePageIndex = document.flatMap { $0.index(for: target.sourcePage) } ?? 0
+        let destinationPageIndex = target.destinationPage.flatMap { page in
+            document?.index(for: page)
+        }
+
+        return CitationLinkSelection(
+            documentPath: documentPath,
+            sourcePageIndex: sourcePageIndex,
+            sourceBounds: target.sourceBounds,
+            labelText: target.labelText,
+            linkKind: target.kind,
+            destinationPageIndex: destinationPageIndex,
+            destinationPoint: target.destinationPoint,
+            externalURL: target.externalURL,
+            referenceText: target.referenceText
+        )
+    }
+
     private func resolvedAnnotationRenderTarget(
         for annotation: PDFAnnotation?,
         fallbackPage: PDFPage?
@@ -2644,6 +2736,107 @@ final class PDFKitView: PDFView {
             rawText: rawText,
             authorName: authorName(for: [annotation])
         )
+    }
+
+    private func resolvedCitationLinkTarget(
+        for annotation: PDFAnnotation?,
+        fallbackPage: PDFPage?
+    ) -> ResolvedCitationLinkTarget? {
+        guard let annotation,
+              let page = annotation.page ?? fallbackPage
+        else {
+            return nil
+        }
+
+        let typeName = (annotation.type ?? "").lowercased()
+        guard typeName.contains("link") else { return nil }
+
+        let labelText = citationLabelText(for: annotation, on: page)
+        guard !labelText.isEmpty else { return nil }
+
+        if let action = annotation.action as? PDFActionGoTo {
+            let destination = action.destination
+            return ResolvedCitationLinkTarget(
+                sourcePage: page,
+                sourceBounds: annotation.bounds,
+                labelText: labelText,
+                kind: .internalReference,
+                destinationPage: destination.page,
+                destinationPoint: destination.point,
+                externalURL: nil,
+                referenceText: destination.page.map { referenceContextText(around: destination.point, on: $0) }
+            )
+        }
+
+        if let destination = annotation.destination {
+            return ResolvedCitationLinkTarget(
+                sourcePage: page,
+                sourceBounds: annotation.bounds,
+                labelText: labelText,
+                kind: .internalReference,
+                destinationPage: destination.page,
+                destinationPoint: destination.point,
+                externalURL: nil,
+                referenceText: destination.page.map { referenceContextText(around: destination.point, on: $0) }
+            )
+        }
+
+        if let action = annotation.action as? PDFActionURL {
+            return ResolvedCitationLinkTarget(
+                sourcePage: page,
+                sourceBounds: annotation.bounds,
+                labelText: labelText,
+                kind: .externalURL,
+                destinationPage: nil,
+                destinationPoint: nil,
+                externalURL: action.url,
+                referenceText: nil
+            )
+        }
+
+        return nil
+    }
+
+    private func citationLabelText(for annotation: PDFAnnotation, on page: PDFPage) -> String {
+        let raw = page.selection(for: annotation.bounds)?.string
+            ?? annotation.contents
+            ?? ""
+        return raw
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func referenceContextText(around point: CGPoint, on page: PDFPage) -> String {
+        let pageBounds = page.bounds(for: .cropBox)
+        let extractionRect = CGRect(
+            x: pageBounds.minX,
+            y: max(pageBounds.minY, point.y - 48),
+            width: pageBounds.width,
+            height: min(pageBounds.height, 110)
+        )
+        let raw = page.selection(for: extractionRect)?.string ?? ""
+        return raw
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func looksLikeCitationLabel(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 160 else { return false }
+
+        let patterns = [
+            #"\b(19|20)\d{2}[a-z]?\b"#,
+            #"\bet al\.\b"#,
+            #"\[[0-9,\-\s]+\]"#,
+            #"\([A-Z][^)]*?\d{4}[^)]*\)"#
+        ]
+
+        for pattern in patterns {
+            if trimmed.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     private func authorName(for annotations: [PDFAnnotation]) -> String? {

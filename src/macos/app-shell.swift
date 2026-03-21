@@ -60,6 +60,7 @@ struct AppShellView: View {
     @State private var isSessionSidebarVisible = true
     @State private var selectionText = ""
     @State private var annotationSelection: AnnotationRenderSelection?
+    @State private var citationSelection: CitationLinkSelection?
     @State private var openErrorMessage = ""
     @State private var isShowingOpenError = false
     @State private var selectedProvider: LLMProvider = .openAI
@@ -75,6 +76,9 @@ struct AppShellView: View {
     @StateObject private var geminiSessionStore = SessionStore(provider: .gemini)
     @StateObject private var qwenSessionStore = SessionStore(provider: .qwen)
     private let renderPipeline = RenderPipeline()
+    private let citationMetadataProvider = CitationMetadataResolver()
+    private let localPaperSearch = LocalPaperSearchService()
+    private let citationExporter = CitationExportService()
 
     var body: some View {
         HSplitView {
@@ -82,6 +86,7 @@ struct AppShellView: View {
                 fileURL: fileURL,
                 onAskLLM: handleAskLLM,
                 onAnnotationSelectionChanged: handleAnnotationSelectionChanged,
+                onCitationSelectionChanged: handleCitationSelectionChanged,
                 searchQuery: searchQuery,
                 searchMode: searchMode,
                 sidebarMode: selectedPDFSidebarMode
@@ -251,6 +256,16 @@ struct AppShellView: View {
         } message: {
             Text(openErrorMessage)
         }
+        .sheet(item: $citationSelection) { selection in
+            CitationCardSheet(
+                selection: selection,
+                metadataProvider: citationMetadataProvider,
+                localPaperSearch: localPaperSearch,
+                exporter: citationExporter,
+                onOpenLocalPDF: openCitationLocalPDF,
+                onSeeInReferences: showCitationInReferences
+            )
+        }
     }
 
     private func handleFileImport(_ result: Result<[URL], Error>) {
@@ -309,6 +324,7 @@ struct AppShellView: View {
         fileURL = url
         selectionText = ""
         annotationSelection = nil
+        citationSelection = nil
         let path = url.path
         if let existingSession = activeSessionStore.latestSession(matchingPDFPath: path) {
             activeSessionStore.selectSession(existingSession.id)
@@ -337,6 +353,7 @@ struct AppShellView: View {
             fileURL = nil
             selectionText = ""
             annotationSelection = nil
+            citationSelection = nil
             return
         }
         let nextURL = URL(fileURLWithPath: path)
@@ -344,6 +361,7 @@ struct AppShellView: View {
             fileURL = nextURL
             selectionText = ""
             annotationSelection = nil
+            citationSelection = nil
         }
     }
 
@@ -352,6 +370,18 @@ struct AppShellView: View {
         if selection != nil {
             isAnnotationPreviewVisible = true
         }
+    }
+
+    private func handleCitationSelectionChanged(_ selection: CitationLinkSelection?) {
+        citationSelection = selection
+    }
+
+    private func showCitationInReferences(_ selection: CitationLinkSelection) {
+        NotificationCenter.default.post(name: .pdfGoToCitationDestination, object: selection)
+    }
+
+    private func openCitationLocalPDF(_ url: URL) {
+        handleOpenFile(url)
     }
 
     private func hasAPIKey(for provider: LLMProvider) -> Bool {
