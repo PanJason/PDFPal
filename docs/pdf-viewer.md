@@ -197,12 +197,18 @@ struct PDFEmptyState: View {}
 - Citation handling only activates for PDF link annotations whose visible label
   looks like a citation (`et al.`, year-based labels, numeric bracket labels,
   or parenthetical author-year labels).
+- Adjacent link fragments that share the same destination are clustered before
+  label extraction so split author/year links like `Luo et al., 2025` behave as
+  a single clickable citation.
+- Suffix-only fragments can inherit author/year context from surrounding text so
+  labels like `Du et al., 2025b,a` can resolve `2025b` and `2025a` separately.
 - Internal `PDFActionGoTo` and destination-backed link annotations are captured
   as citation selections rather than being navigated immediately.
 - The original destination page and point are preserved so the app can later
   execute an exact `See in references` jump.
-- A small reference-context snippet is extracted near the destination point and
-  forwarded to the metadata resolver to improve title/DOI/arXiv matching.
+- Reference context is extracted by scanning nearby bibliography lines around
+  the destination point, then selecting the best-matching entry for the clicked
+  citation label instead of taking a raw rectangular text slice.
 - Non-citation links continue to fall through to normal PDFKit behavior.
 
 ## Known Issues / TODO
