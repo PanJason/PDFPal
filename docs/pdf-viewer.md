@@ -7,7 +7,10 @@ adds context menu actions for Ask LLM and PDF annotations. It supports
 highlighting selections with color, underlining, strikethrough, editing
 annotation notes from a right-click menu on existing annotations, and
 publishing the currently selected/opened note-bearing annotation into the
-annotation preview pipeline.
+annotation preview pipeline. It also intercepts individually clickable citation
+links, preserves their original PDF destinations, extracts reference context
+from the bibliography target, and reports citation selections back to the app
+shell for citation-card presentation.
 
 ## Public API
 ```swift
@@ -44,13 +47,17 @@ enum PDFSidebarMode {}
  * @onAskLLM: Callback invoked when the user selects Ask LLM from the context menu
  * @onAnnotationSelectionChanged: Callback invoked when the user selects or opens
  * a note-bearing PDF annotation
+ * @onCitationSelectionChanged: Callback invoked when the user clicks a
+ * citation-like PDF link annotation
  * @searchQuery: Current toolbar query text
  * @searchMode: Current toolbar search mode
  * @sidebarMode: Current selected left sidebar mode
  *
  * Displays a PDF with auto-scaling, shows empty/error states, routes the
  * current selection to the app shell when Ask LLM is chosen, and reports the
- * currently selected/opened annotation note for rendering.
+ * currently selected/opened annotation note for rendering. Citation link clicks
+ * are intercepted before PDFKit navigates them so the app can show a citation
+ * card while still preserving exact "See in references" behavior.
  *
  * Return: SwiftUI View
  */
@@ -61,6 +68,7 @@ struct PDFViewer: View {}
  * @document: PDFDocument instance to render
  * @onAskLLM: Callback invoked for Ask LLM menu action
  * @onAnnotationSelectionChanged: Callback invoked for annotation note preview
+ * @onCitationSelectionChanged: Callback invoked for citation card selection
  * @searchQuery: Query string to search in the loaded document
  * @searchMode: Match mode for the query
  */
@@ -71,6 +79,8 @@ struct PDFKitContainer: NSViewRepresentable {}
  * @onAskLLM: Closure called with the current selection text
  * @onAnnotationSelectionChanged: Closure called with the resolved note-bearing
  * annotation selection to preview
+ * @onCitationSelectionChanged: Closure called with the resolved citation-link
+ * selection for card presentation
  *
  * Adds:
  * - "Annotate Selection" submenu (highlight colors, underline, strikethrough)
@@ -79,6 +89,8 @@ struct PDFKitContainer: NSViewRepresentable {}
  * - "Ask LLM" on current text selection
  * - annotation note preview publishing for note markers, grouped markup notes,
  *   and note entries selected from the highlights sidebar
+ * - citation-link interception for individually clickable PDF link annotations
+ * - exact reference jumping through Notification.Name.pdfGoToCitationDestination
  * - toolbar-driven PDF search for Any Match and Exact Phrase
  */
 final class PDFKitView: PDFView {}
@@ -105,11 +117,16 @@ struct PDFEmptyState: View {}
 - `PDFKitView` also resolves the currently selected/opened annotation note into
   an `AnnotationRenderSelection` so the app shell can render it in the preview
   panel.
+- `PDFKitView` also resolves clicked citation link annotations into
+  `CitationLinkSelection` values, including the source page/bounds, the exact
+  original PDF destination, and reference text extracted near the destination.
 
 ## Integration Points
 - The `onAskLLM` callback is wired to `AppShellView` to open the chat panel.
 - The `onAnnotationSelectionChanged` callback is wired to `AppShellView` to
   update the right-side annotation preview panel.
+- The `onCitationSelectionChanged` callback is wired to `AppShellView` to open
+  the citation details sheet.
 - The file URL is provided by the file importer in the app shell.
 - Toolbar highlight actions post a `PDFAnnotationAction` notification that the
   active PDF view applies to the current selection.
@@ -121,6 +138,9 @@ struct PDFEmptyState: View {}
   to switch between hidden/thumbnails/table-of-contents/highlights/bookmarks.
 - Clicking an entry in the `Highlights and Notes` sidebar also publishes its
   resolved note text to the preview pipeline when a note exists.
+- `Notification.Name.pdfGoToCitationDestination` is consumed by `PDFKitView` to
+  jump back to the exact reference destination captured from the original
+  citation link click.
 
 ## Thumbnail Sidebar Behavior
 - `Thumbnails` mode is implemented with `PDFThumbnailView`, which is sensitive to
@@ -173,6 +193,18 @@ struct PDFEmptyState: View {}
   publishes the corresponding note text to the preview panel when note content
   exists.
 
+## Citation Link Behavior
+- Citation handling only activates for PDF link annotations whose visible label
+  looks like a citation (`et al.`, year-based labels, numeric bracket labels,
+  or parenthetical author-year labels).
+- Internal `PDFActionGoTo` and destination-backed link annotations are captured
+  as citation selections rather than being navigated immediately.
+- The original destination page and point are preserved so the app can later
+  execute an exact `See in references` jump.
+- A small reference-context snippet is extracted near the destination point and
+  forwarded to the metadata resolver to improve title/DOI/arXiv matching.
+- Non-citation links continue to fall through to normal PDFKit behavior.
+
 ## Known Issues / TODO
 - `Thumbnails` mode intentionally favors visual stability over live-resize
   responsiveness. While dragging the divider, thumbnails may hold their previous
@@ -186,6 +218,7 @@ HSplitView {
         fileURL: fileURL,
         onAskLLM: handleAskLLM,
         onAnnotationSelectionChanged: handleAnnotationSelectionChanged,
+        onCitationSelectionChanged: handleCitationSelectionChanged,
         searchQuery: searchQuery,
         searchMode: searchMode,
         sidebarMode: selectedPDFSidebarMode
