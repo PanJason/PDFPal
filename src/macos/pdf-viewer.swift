@@ -1073,6 +1073,8 @@ final class PDFKitView: PDFView {
     private var lastSearchSignature: String = ""
     private var searchMatches: [PDFSelection] = []
     private var currentSearchMatchIndex: Int?
+    private var pendingActionAnnotation: PDFAnnotation?
+    private var shouldSuppressMouseUpAfterCitationIntercept = false
     // Active-annotation live note polling
     private var activeAnnotation: PDFAnnotation?
     private var activeFallbackPage: PDFPage?
@@ -1128,20 +1130,39 @@ final class PDFKitView: PDFView {
         super.setCurrentSelection(selection, animate: animate)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        pendingActionAnnotation = annotation(at: event)
+        super.mouseDown(with: event)
+    }
+
     override func mouseUp(with event: NSEvent) {
+        if shouldSuppressMouseUpAfterCitationIntercept {
+            shouldSuppressMouseUpAfterCitationIntercept = false
+            pendingActionAnnotation = nil
+            return
+        }
+
+        super.mouseUp(with: event)
+        pendingActionAnnotation = nil
         let clickedAnnotation = annotation(at: event)
+        onCitationSelectionChanged?(nil)
+        publishAnnotationSelection(for: clickedAnnotation, fallbackPage: contextMenuPage)
+    }
+
+    override func perform(_ action: PDFAction) {
+        defer { pendingActionAnnotation = nil }
+
         if let citationSelection = resolvedCitationLinkSelection(
-            for: clickedAnnotation,
-            fallbackPage: contextMenuPage
+            for: pendingActionAnnotation,
+            fallbackPage: pendingActionAnnotation?.page ?? contextMenuPage
         ) {
+            shouldSuppressMouseUpAfterCitationIntercept = true
             publishAnnotationSelection(for: nil, fallbackPage: nil)
             onCitationSelectionChanged?(citationSelection)
             return
         }
 
-        super.mouseUp(with: event)
-        onCitationSelectionChanged?(nil)
-        publishAnnotationSelection(for: clickedAnnotation, fallbackPage: contextMenuPage)
+        super.perform(action)
     }
 
     func updateSearch(query: String, mode: PDFSearchMode) {
@@ -1960,6 +1981,24 @@ final class PDFKitView: PDFView {
         let referenceText: String?
     }
 
+    private struct CitationLinkDestinationSignature: Hashable {
+        let kind: CitationLinkKind
+        let destinationPageIndex: Int?
+        let xBucket: Int?
+        let yBucket: Int?
+        let externalURL: String?
+    }
+
+    private struct CitationLabelFingerprint {
+        let authorToken: String?
+        let yearToken: String?
+    }
+
+    private struct ReferenceLineCandidate {
+        let text: String
+        let range: NSRange
+    }
+
     private func contextMarkupNoteTarget() -> MarkupNoteTarget? {
         if let annotation = contextMenuAnnotation {
             if isRemovableMarkup(annotation), let page = annotation.page {
@@ -2751,50 +2790,64 @@ final class PDFKitView: PDFView {
         let typeName = (annotation.type ?? "").lowercased()
         guard typeName.contains("link") else { return nil }
 
-        let labelText = citationLabelText(for: annotation, on: page)
-        guard !labelText.isEmpty else { return nil }
+        let kind: CitationLinkKind
+        let destinationPage: PDFPage?
+        let destinationPoint: CGPoint?
+        let externalURL: URL?
 
         if let action = annotation.action as? PDFActionGoTo {
-            let destination = action.destination
-            return ResolvedCitationLinkTarget(
-                sourcePage: page,
-                sourceBounds: annotation.bounds,
-                labelText: labelText,
-                kind: .internalReference,
-                destinationPage: destination.page,
-                destinationPoint: destination.point,
-                externalURL: nil,
-                referenceText: destination.page.map { referenceContextText(around: destination.point, on: $0) }
-            )
+            kind = .internalReference
+            destinationPage = action.destination.page
+            destinationPoint = action.destination.point
+            externalURL = nil
+        } else if let destination = annotation.destination {
+            kind = .internalReference
+            destinationPage = destination.page
+            destinationPoint = destination.point
+            externalURL = nil
+        } else if let action = annotation.action as? PDFActionURL {
+            kind = .externalURL
+            destinationPage = nil
+            destinationPoint = nil
+            externalURL = action.url
+        } else {
+            return nil
         }
 
-        if let destination = annotation.destination {
-            return ResolvedCitationLinkTarget(
-                sourcePage: page,
-                sourceBounds: annotation.bounds,
-                labelText: labelText,
-                kind: .internalReference,
-                destinationPage: destination.page,
-                destinationPoint: destination.point,
-                externalURL: nil,
-                referenceText: destination.page.map { referenceContextText(around: destination.point, on: $0) }
-            )
+        let cluster = citationLinkCluster(
+            containing: annotation,
+            on: page,
+            kind: kind,
+            destinationPage: destinationPage,
+            destinationPoint: destinationPoint,
+            externalURL: externalURL
+        )
+        let sourceBounds = cluster.reduce(annotation.bounds) { partialResult, item in
+            partialResult.union(item.bounds)
         }
+        let labelText = resolvedCitationLabel(
+            from: cluster,
+            primaryAnnotation: annotation,
+            on: page
+        )
+        guard !labelText.isEmpty else { return nil }
 
-        if let action = annotation.action as? PDFActionURL {
-            return ResolvedCitationLinkTarget(
-                sourcePage: page,
-                sourceBounds: annotation.bounds,
-                labelText: labelText,
-                kind: .externalURL,
-                destinationPage: nil,
-                destinationPoint: nil,
-                externalURL: action.url,
-                referenceText: nil
-            )
-        }
-
-        return nil
+        return ResolvedCitationLinkTarget(
+            sourcePage: page,
+            sourceBounds: sourceBounds,
+            labelText: labelText,
+            kind: kind,
+            destinationPage: destinationPage,
+            destinationPoint: destinationPoint,
+            externalURL: externalURL,
+            referenceText: destinationPage.map {
+                referenceContextText(
+                    around: destinationPoint,
+                    on: $0,
+                    matching: labelText
+                )
+            }
+        )
     }
 
     private func citationLabelText(for annotation: PDFAnnotation, on page: PDFPage) -> String {
@@ -2806,18 +2859,492 @@ final class PDFKitView: PDFView {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func referenceContextText(around point: CGPoint, on page: PDFPage) -> String {
-        let pageBounds = page.bounds(for: .cropBox)
-        let extractionRect = CGRect(
-            x: pageBounds.minX,
-            y: max(pageBounds.minY, point.y - 48),
-            width: pageBounds.width,
-            height: min(pageBounds.height, 110)
+    private func citationLinkCluster(
+        containing annotation: PDFAnnotation,
+        on page: PDFPage,
+        kind: CitationLinkKind,
+        destinationPage: PDFPage?,
+        destinationPoint: CGPoint?,
+        externalURL: URL?
+    ) -> [PDFAnnotation] {
+        let signature = citationDestinationSignature(
+            kind: kind,
+            destinationPage: destinationPage,
+            destinationPoint: destinationPoint,
+            externalURL: externalURL
         )
-        let raw = page.selection(for: extractionRect)?.string ?? ""
-        return raw
+        let candidates = page.annotations
+            .filter { candidate in
+                let typeName = (candidate.type ?? "").lowercased()
+                guard typeName.contains("link") else { return false }
+                return citationDestinationSignature(for: candidate) == signature
+            }
+            .sorted { lhs, rhs in
+                if abs(lhs.bounds.midY - rhs.bounds.midY) > 2 {
+                    return lhs.bounds.midY > rhs.bounds.midY
+                }
+                return lhs.bounds.minX < rhs.bounds.minX
+            }
+
+        guard let seedIndex = candidates.firstIndex(where: { $0 === annotation || annotationsLikelySame($0, annotation) }) else {
+            return [annotation]
+        }
+
+        var cluster: [PDFAnnotation] = [candidates[seedIndex]]
+        var leftIndex = seedIndex - 1
+        while leftIndex >= 0 {
+            let candidate = candidates[leftIndex]
+            guard citationAnnotationsAreAdjacent(candidate, cluster.first!) else { break }
+            cluster.insert(candidate, at: 0)
+            leftIndex -= 1
+        }
+
+        var rightIndex = seedIndex + 1
+        while rightIndex < candidates.count {
+            let candidate = candidates[rightIndex]
+            guard citationAnnotationsAreAdjacent(cluster.last!, candidate) else { break }
+            cluster.append(candidate)
+            rightIndex += 1
+        }
+
+        return cluster
+    }
+
+    private func citationAnnotationsAreAdjacent(_ lhs: PDFAnnotation, _ rhs: PDFAnnotation) -> Bool {
+        let verticalGap = abs(lhs.bounds.midY - rhs.bounds.midY)
+        let horizontalGap = rhs.bounds.minX - lhs.bounds.maxX
+        return verticalGap <= 4 && horizontalGap <= 18
+    }
+
+    private func citationDestinationSignature(
+        for annotation: PDFAnnotation
+    ) -> CitationLinkDestinationSignature? {
+        if let action = annotation.action as? PDFActionGoTo {
+            return citationDestinationSignature(
+                kind: .internalReference,
+                destinationPage: action.destination.page,
+                destinationPoint: action.destination.point,
+                externalURL: nil
+            )
+        }
+        if let destination = annotation.destination {
+            return citationDestinationSignature(
+                kind: .internalReference,
+                destinationPage: destination.page,
+                destinationPoint: destination.point,
+                externalURL: nil
+            )
+        }
+        if let action = annotation.action as? PDFActionURL {
+            return citationDestinationSignature(
+                kind: .externalURL,
+                destinationPage: nil,
+                destinationPoint: nil,
+                externalURL: action.url
+            )
+        }
+        return nil
+    }
+
+    private func citationDestinationSignature(
+        kind: CitationLinkKind,
+        destinationPage: PDFPage?,
+        destinationPoint: CGPoint?,
+        externalURL: URL?
+    ) -> CitationLinkDestinationSignature {
+        let destinationPageIndex = destinationPage.flatMap { page in
+            document?.index(for: page)
+        }
+        let xBucket = destinationPoint.map { Int(($0.x / 6).rounded()) }
+        let yBucket = destinationPoint.map { Int(($0.y / 6).rounded()) }
+        return CitationLinkDestinationSignature(
+            kind: kind,
+            destinationPageIndex: destinationPageIndex,
+            xBucket: xBucket,
+            yBucket: yBucket,
+            externalURL: externalURL?.absoluteString
+        )
+    }
+
+    private func resolvedCitationLabel(
+        from cluster: [PDFAnnotation],
+        primaryAnnotation: PDFAnnotation,
+        on page: PDFPage
+    ) -> String {
+        let combinedLabel = cleanCitationText(
+            cluster.map { citationLabelText(for: $0, on: page) }.joined(separator: " ")
+        )
+        if looksLikeCitationLabel(combinedLabel) {
+            return combinedLabel
+        }
+
+        let bounds = cluster.reduce(primaryAnnotation.bounds) { partialResult, item in
+            partialResult.union(item.bounds)
+        }
+        let contexts = citationLineContexts(around: bounds, on: page)
+        let primaryLabel = cleanCitationText(citationLabelText(for: primaryAnnotation, on: page))
+
+        if let inferred = inferCitationLabel(
+            current: combinedLabel.isEmpty ? primaryLabel : combinedLabel,
+            primaryFragment: primaryLabel,
+            leftContext: contexts.left,
+            rightContext: contexts.right
+        ) {
+            return inferred
+        }
+
+        return combinedLabel.isEmpty ? primaryLabel : combinedLabel
+    }
+
+    private func citationLineContexts(
+        around bounds: CGRect,
+        on page: PDFPage
+    ) -> (left: String, right: String) {
+        let samplePoint = CGPoint(x: bounds.midX, y: bounds.midY)
+        guard let lineSelection = page.selectionForLine(at: samplePoint) else {
+            return ("", "")
+        }
+
+        let lineBounds = lineSelection.bounds(for: page).insetBy(dx: -2, dy: -1)
+        let leftRect = CGRect(
+            x: lineBounds.minX,
+            y: lineBounds.minY,
+            width: max(0, bounds.minX - lineBounds.minX),
+            height: lineBounds.height
+        )
+        let rightRect = CGRect(
+            x: bounds.maxX,
+            y: lineBounds.minY,
+            width: max(0, lineBounds.maxX - bounds.maxX),
+            height: lineBounds.height
+        )
+
+        let leftText = cleanCitationText(page.selection(for: leftRect)?.string ?? "")
+        let rightText = cleanCitationText(page.selection(for: rightRect)?.string ?? "")
+        return (leftText, rightText)
+    }
+
+    private func inferCitationLabel(
+        current: String,
+        primaryFragment: String,
+        leftContext: String,
+        rightContext: String
+    ) -> String? {
+        let currentTrimmed = cleanCitationText(current)
+        let fragmentTrimmed = cleanCitationText(primaryFragment)
+
+        if fragmentTrimmed.range(of: #"^[a-z]$"#, options: .regularExpression) != nil,
+           let inherited = inheritedAuthorYearPrefix(from: leftContext) {
+            return "\(inherited.authorPart)\(inherited.year)\(fragmentTrimmed)"
+        }
+
+        if fragmentTrimmed.range(of: #"^(19|20)\d{2}[a-z]?$"#, options: .regularExpression) != nil,
+           let authorPart = inheritedAuthorYearPrefix(from: leftContext)?.authorPart {
+            return cleanCitationText("\(authorPart)\(fragmentTrimmed)")
+        }
+
+        if !looksLikeCitationLabel(currentTrimmed),
+           let authorPart = trailingAuthorCitationPrefix(from: leftContext),
+           let yearFragment = leadingYearFragment(from: rightContext) {
+            return cleanCitationText("\(authorPart)\(yearFragment)")
+        }
+
+        return looksLikeCitationLabel(currentTrimmed) ? currentTrimmed : nil
+    }
+
+    private func inheritedAuthorYearPrefix(from leftContext: String) -> (authorPart: String, year: String)? {
+        let pattern = #"([A-Z][A-Za-z0-9 .,&'’\-]+?(?:et al\.,?\s*|and [A-Z][A-Za-z0-9 .,&'’\-]+\s*,?\s*|,\s*))((?:19|20)\d{2})[a-z]?\s*[,;]?\s*$"#
+        guard let match = citationRegexMatch(pattern, in: leftContext),
+              match.count > 2 else {
+            return nil
+        }
+        return (cleanCitationText(match[1]), match[2])
+    }
+
+    private func trailingAuthorCitationPrefix(from leftContext: String) -> String? {
+        let patterns = [
+            #"([A-Z][A-Za-z0-9 .,&'’\-]+?et al\.,?\s*)$"#,
+            #"([A-Z][A-Za-z0-9 .,&'’\-]+?,\s*)$"#
+        ]
+
+        for pattern in patterns {
+            if let match = citationRegexMatch(pattern, in: leftContext), match.count > 1 {
+                return cleanCitationText(match[1])
+            }
+        }
+        return nil
+    }
+
+    private func leadingYearFragment(from rightContext: String) -> String? {
+        let patterns = [
+            #"^((?:19|20)\d{2}[a-z]?)"#,
+            #"^,\s*((?:19|20)\d{2}[a-z]?)"#
+        ]
+
+        for pattern in patterns {
+            if let match = citationRegexMatch(pattern, in: rightContext), match.count > 1 {
+                return cleanCitationText(match[1])
+            }
+        }
+        return nil
+    }
+
+    private func citationRegexMatch(_ pattern: String, in text: String) -> [String]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return nil
+        }
+        let nsRange = NSRange(location: 0, length: (text as NSString).length)
+        guard let match = regex.firstMatch(in: text, options: [], range: nsRange) else {
+            return nil
+        }
+        return (0..<match.numberOfRanges).compactMap { index in
+            guard let range = Range(match.range(at: index), in: text) else { return nil }
+            return String(text[range])
+        }
+    }
+
+    private func cleanCitationText(_ text: String) -> String {
+        text
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+([,;:.])", with: "$1", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func referenceContextText(
+        around point: CGPoint?,
+        on page: PDFPage,
+        matching labelText: String
+    ) -> String {
+        let nearbyLines = nearbyReferenceLines(around: point, on: page)
+        if let matchedEntry = bestMatchingReferenceEntry(
+            for: labelText,
+            among: nearbyLines
+        ) {
+            return matchedEntry
+        }
+
+        let seedPoint = point ?? CGPoint(
+            x: page.bounds(for: .cropBox).midX,
+            y: page.bounds(for: .cropBox).midY
+        )
+        guard let firstLine = page.selectionForLine(at: seedPoint),
+              let firstRange = referenceLineRange(for: firstLine, on: page)
+        else {
+            return ""
+        }
+
+        let pageString = page.string ?? ""
+        var lines: [String] = [cleanCitationText(firstLine.string ?? "")]
+        var nextIndex = NSMaxRange(firstRange)
+
+        for _ in 0..<4 {
+            nextIndex = nextNonWhitespaceCharacterIndex(in: pageString, from: nextIndex)
+            guard nextIndex < page.numberOfCharacters,
+                  let nextLine = lineSelection(atCharacterIndex: nextIndex, on: page),
+                  let nextRange = referenceLineRange(for: nextLine, on: page)
+            else {
+                break
+            }
+
+            let nextText = cleanCitationText(nextLine.string ?? "")
+            guard !nextText.isEmpty else { break }
+            if looksLikeNewReferenceEntry(nextText), !lines.isEmpty {
+                break
+            }
+            if lines.last == nextText {
+                break
+            }
+
+            lines.append(nextText)
+            nextIndex = NSMaxRange(nextRange)
+        }
+
+        return lines.joined(separator: " ")
+    }
+
+    private func nearbyReferenceLines(
+        around point: CGPoint?,
+        on page: PDFPage
+    ) -> [ReferenceLineCandidate] {
+        let pageBounds = page.bounds(for: .cropBox)
+        let anchorY = point?.y ?? pageBounds.midY
+        let scanRect = CGRect(
+            x: pageBounds.minX,
+            y: max(pageBounds.minY, anchorY - 120),
+            width: pageBounds.width,
+            height: min(pageBounds.height, 240)
+        )
+
+        guard let selection = page.selection(for: scanRect) else { return [] }
+        let lines = selection.selectionsByLine()
+            .filter { $0.pages.first === page }
+            .compactMap { lineSelection -> ReferenceLineCandidate? in
+                guard let range = referenceLineRange(for: lineSelection, on: page) else {
+                    return nil
+                }
+                let text = cleanCitationText(lineSelection.string ?? "")
+                guard !text.isEmpty else { return nil }
+                return ReferenceLineCandidate(text: text, range: range)
+            }
+
+        return lines.sorted { lhs, rhs in
+            lhs.range.location < rhs.range.location
+        }
+    }
+
+    private func bestMatchingReferenceEntry(
+        for labelText: String,
+        among lines: [ReferenceLineCandidate]
+    ) -> String? {
+        guard !lines.isEmpty else { return nil }
+        let fingerprint = citationLabelFingerprint(from: labelText)
+        var bestEntry: String?
+        var bestScore = Int.min
+
+        for startIndex in lines.indices {
+            let entry = collectReferenceEntry(startingAt: startIndex, from: lines)
+            let score = referenceEntryScore(entry, fingerprint: fingerprint)
+            if score > bestScore {
+                bestScore = score
+                bestEntry = entry
+            }
+        }
+
+        return bestScore > 0 ? bestEntry : nil
+    }
+
+    private func collectReferenceEntry(
+        startingAt startIndex: Int,
+        from lines: [ReferenceLineCandidate]
+    ) -> String {
+        guard lines.indices.contains(startIndex) else { return "" }
+        var collected = [lines[startIndex].text]
+        var nextIndex = startIndex + 1
+
+        while nextIndex < lines.count {
+            let nextLine = lines[nextIndex].text
+            if looksLikeNewReferenceEntry(nextLine) {
+                break
+            }
+            if collected.last == nextLine {
+                break
+            }
+            collected.append(nextLine)
+            nextIndex += 1
+        }
+
+        return collected.joined(separator: " ")
+    }
+
+    private func citationLabelFingerprint(from labelText: String) -> CitationLabelFingerprint {
+        let cleaned = cleanCitationText(labelText)
+
+        let yearToken = citationRegexMatch(
+            #"((?:19|20)\d{2}[a-z]?)"#,
+            in: cleaned
+        )?.dropFirst().first.map { String($0) }
+
+        let authorPatterns = [
+            #"([A-Z][A-Za-z'’\-]+)\s+et al\."#,
+            #"([A-Z][A-Za-z'’\-]+)\s+and\s+[A-Z][A-Za-z'’\-]+"#,
+            #"([A-Z][A-Za-z'’\-]+),"#
+        ]
+
+        var authorToken: String?
+        for pattern in authorPatterns {
+            if let match = citationRegexMatch(pattern, in: cleaned),
+               match.count > 1 {
+                authorToken = match[1].lowercased()
+                break
+            }
+        }
+
+        return CitationLabelFingerprint(
+            authorToken: authorToken,
+            yearToken: yearToken?.lowercased()
+        )
+    }
+
+    private func referenceEntryScore(
+        _ entry: String,
+        fingerprint: CitationLabelFingerprint
+    ) -> Int {
+        let normalizedEntry = cleanCitationText(entry).lowercased()
+        guard !normalizedEntry.isEmpty else { return Int.min }
+
+        var score = 0
+
+        if let authorToken = fingerprint.authorToken {
+            if normalizedEntry.range(of: "\\b\(NSRegularExpression.escapedPattern(for: authorToken))\\b", options: .regularExpression) != nil {
+                score += 5
+            } else {
+                score -= 4
+            }
+        }
+
+        if let yearToken = fingerprint.yearToken {
+            if normalizedEntry.contains(yearToken) {
+                score += 8
+            } else if normalizedEntry.contains(String(yearToken.prefix(4))) {
+                score += 3
+            } else {
+                score -= 6
+            }
+        }
+
+        if looksLikeNewReferenceEntry(entry) {
+            score += 1
+        }
+
+        return score
+    }
+
+    private func lineSelection(atCharacterIndex index: Int, on page: PDFPage) -> PDFSelection? {
+        guard index >= 0, index < page.numberOfCharacters else { return nil }
+        guard let selection = page.selection(for: NSRange(location: index, length: 1)) else {
+            return nil
+        }
+        selection.extendForLineBoundaries()
+        return selection
+    }
+
+    private func referenceLineRange(for selection: PDFSelection, on page: PDFPage) -> NSRange? {
+        guard selection.pages.contains(where: { $0 === page }),
+              selection.numberOfTextRanges(on: page) > 0
+        else {
+            return nil
+        }
+        return selection.range(at: 0, on: page)
+    }
+
+    private func nextNonWhitespaceCharacterIndex(in text: String, from start: Int) -> Int {
+        guard start < text.count else { return start }
+        let characters = Array(text)
+        var index = start
+        while index < characters.count {
+            if !characters[index].isWhitespace && characters[index] != "\n" && characters[index] != "\r" {
+                return index
+            }
+            index += 1
+        }
+        return index
+    }
+
+    private func looksLikeNewReferenceEntry(_ text: String) -> Bool {
+        let patterns = [
+            #"^[A-Z][A-Za-z'’\-]+,\s*[A-Z]"#,
+            #"^[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+)*,\s*(?:[A-Z]\.)"#,
+            #"^[A-Z][A-Za-z0-9 .,&'’\-]+?\.\s*(19|20)\d{2}[a-z]?\."#,
+            #"^(?:[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+)+,\s*){2,}"#,
+            #"^(?:[A-Z]\.\s*)?[A-Z][A-Za-z'’\-]+,\s+(?:[A-Z][A-Za-z'’\-]+\s+){1,3}[A-Z][A-Za-z'’\-]+(?:,\s*(?:and\s+)?){1}"#
+        ]
+
+        for pattern in patterns {
+            if text.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     private func looksLikeCitationLabel(_ text: String) -> Bool {
