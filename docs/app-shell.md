@@ -6,6 +6,10 @@ lifecycle, and split view layout that hosts the PDF panel, chat panel, and
 annotation preview panel. It handles file selection via the system file
 importer, reveals the chat panel when an Ask LLM action occurs, and reveals the
 annotation preview panel when the user selects or opens a PDF annotation note.
+It also presents a citation details sheet when the user clicks a citation-like
+PDF link, coordinating metadata lookup, local paper search, citation export,
+browser handoff, and exact `See in references` navigation through the PDF
+viewer.
 It also exposes a model family picker (OpenAI, Claude, Gemini, Qwen) in the toolbar,
 a PDF annotation menu (highlight/underline/strikethrough), and a view menu that
 toggles the chat panel, session sidebar, annotation preview, and PDF sidebar
@@ -30,9 +34,9 @@ struct LLMPaperReadingHelperApp: App {}
  * AppShellView - Main split view shell for macOS
  *
  * Owns UI state for selected PDF URL, selection text, the active annotation
- * preview selection, and whether the chat/preview panels are visible. Hosts
- * PDFViewer, the chat panel, and AnnotationPreviewPanel. Allows switching
- * between model families.
+ * preview selection, active citation selection, and whether the chat/preview
+ * panels are visible. Hosts PDFViewer, the chat panel, AnnotationPreviewPanel,
+ * and CitationCardSheet. Allows switching between model families.
  */
 struct AppShellView: View {}
 
@@ -94,18 +98,33 @@ struct QwenLLMChatServing: View {}
  * Markdown with math support in a dedicated panel.
  */
 struct AnnotationPreviewPanel: View {}
+
+/**
+ * CitationCardSheet - Citation details modal for clicked PDF citations
+ * @selection: Current citation link selection captured from PDFKit
+ * @metadataProvider: Metadata lookup backend
+ * @localPaperSearch: Local PDF search helper
+ * @exporter: Citation export generator
+ *
+ * Loads paper metadata asynchronously, shows abstract/title/action state, and
+ * coordinates PDF open, export, browser handoff, and exact reference-jump
+ * behavior from the app shell layer.
+ */
+struct CitationCardSheet: View {}
 ```
 
 ## State Management
 - `AppShellView` owns `@State` properties for file selection, chat visibility,
   annotation preview visibility, selection text, current annotation note
-  selection, provider selection, and error presentation, plus `@StateObject`
-  session stores for each provider.
+  selection, current citation selection, provider selection, and error
+  presentation, plus `@StateObject` session stores for each provider.
 - `AppShellView` also owns `searchQuery` and `searchMode` state, and a search
   focus request token used by `Cmd+F` to focus the toolbar search field.
 - `selectionText` is updated when `PDFViewer` invokes the Ask LLM callback.
 - `annotationSelection` is updated when `PDFViewer` reports the currently
   selected/opened PDF annotation note.
+- `citationSelection` is updated when `PDFViewer` reports a clicked citation
+  link selection and drives the citation sheet presentation.
 - Ask LLM only updates context on the active session when it matches the
   current PDF; otherwise it creates a session only if a provider key exists.
 - `documentId` is derived from the selected file name and passed into the
@@ -114,7 +133,7 @@ struct AnnotationPreviewPanel: View {}
   PDF path so the left panel follows the active session.
 - Restored sessions are wired to reopen their PDFs as soon as they are selected.
 - When the user opens a different PDF or switches to a session for another PDF,
-  the current annotation preview selection is cleared.
+  the current annotation preview selection and citation selection are cleared.
 
 ## Integration Points
 - PDF rendering, search, and Ask LLM selection are provided by `PDFViewer` from
@@ -122,6 +141,9 @@ struct AnnotationPreviewPanel: View {}
 - Annotation note selection is also provided by `PDFViewer`, which bridges
   PDFKit annotation state into `AnnotationRenderSelection` values for the app
   shell.
+- Citation link selection is also provided by `PDFViewer`, which bridges
+  citation-like PDF link annotations into `CitationLinkSelection` values for the
+  citation sheet flow.
 - Chat rendering is provided by `OpenAILLMChatServing`, `ClaudeLLMChatServing`,
   `GeminiLLMChatServing`, or `QwenLLMChatServing` in `src/macos/app-shell.swift`,
   each delegating to `ChatPanel` in `src/macos/chat-panel.swift` with the
@@ -129,6 +151,10 @@ struct AnnotationPreviewPanel: View {}
 - Annotation note preview rendering is provided by `AnnotationPreviewPanel` in
   `src/macos/notes-panel.swift`, which uses `RenderPipeline` and `RenderView`
   from `src/macos/render/`.
+- Citation details rendering is provided by `CitationCardSheet` in
+  `src/macos/citation/citation-card.swift`, backed by `CitationMetadataResolver`,
+  `LocalPaperSearchService`, and `CitationExportService` in
+  `src/macos/citation/`.
 - File import uses SwiftUI `fileImporter` with `UTType.pdf`.
 - Toolbar annotation actions are broadcast as `PDFAnnotationAction` via
   `Notification.Name.pdfApplyAnnotation` and applied by `PDFKitView`.
@@ -142,6 +168,11 @@ struct AnnotationPreviewPanel: View {}
   executes the document search.
 - The view menu includes an `Annotation Preview` toggle. The preview panel also
   opens automatically when a note-bearing annotation is selected.
+- Citation-sheet `See in references` posts
+  `Notification.Name.pdfGoToCitationDestination`, which `PDFKitView` consumes to
+  perform the exact preserved destination jump.
+- Citation-sheet `PDF` actions either reopen a matched local PDF in the shell or
+  fall back to browser handoff for remote/open-access URLs.
 
 ## Usage Examples
 ```swift
@@ -155,6 +186,7 @@ HSplitView {
         fileURL: fileURL,
         onAskLLM: handleAskLLM,
         onAnnotationSelectionChanged: handleAnnotationSelectionChanged,
+        onCitationSelectionChanged: handleCitationSelectionChanged,
         searchQuery: searchQuery,
         searchMode: searchMode,
         sidebarMode: selectedPDFSidebarMode
