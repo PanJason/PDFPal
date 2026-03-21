@@ -97,6 +97,7 @@ struct CitationExportService: CitationExporting {}
   - DOI/arXiv/reference heuristics
   - Semantic Scholar primary lookup
   - OpenAlex fallback search
+  - result ranking by extracted title, author token, year, DOI, and arXiv ID
   - in-memory result cache
 - `local-paper-search.swift`
   - standard-folder enumeration
@@ -123,6 +124,9 @@ struct CitationExportService: CitationExporting {}
 - Local search is intentionally scoped to `~/Documents`, `~/Downloads`, and
   `~/Desktop` for v1.
 - Title matching is exact after normalization; there is no fuzzy matching yet.
+- Provider search does not accept the first hit blindly; candidate results are
+  scored against the citation text and extracted reference entry before a paper
+  is selected.
 - Provider/search results are cached only inside the resolver actor and are not
   exposed as a user-facing persistent store.
 
