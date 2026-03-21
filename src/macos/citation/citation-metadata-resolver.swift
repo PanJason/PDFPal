@@ -50,14 +50,14 @@ actor CitationMetadataResolver: CitationMetadataProviding {
         }
 
         for query in candidate.searchQueries {
-            if let metadata = try await searchSemanticScholar(query: query) {
+            if let metadata = try await searchSemanticScholar(query: query, candidate: candidate) {
                 cache[cacheKey] = metadata
                 return metadata
             }
         }
 
         for query in candidate.searchQueries {
-            if let metadata = try await searchOpenAlex(query: query) {
+            if let metadata = try await searchOpenAlex(query: query, candidate: candidate) {
                 cache[cacheKey] = metadata
                 return metadata
             }
@@ -85,12 +85,15 @@ actor CitationMetadataResolver: CitationMetadataProviding {
         return paper.toMetadata()
     }
 
-    private func searchSemanticScholar(query: String) async throws -> CitationMetadata? {
+    private func searchSemanticScholar(
+        query: String,
+        candidate: CitationQueryCandidate
+    ) async throws -> CitationMetadata? {
         guard !query.isEmpty else { return nil }
         var components = URLComponents(string: "https://api.semanticscholar.org/graph/v1/paper/search")
         components?.queryItems = [
             URLQueryItem(name: "query", value: query),
-            URLQueryItem(name: "limit", value: "3"),
+            URLQueryItem(name: "limit", value: "10"),
             URLQueryItem(name: "fields", value: SemanticScholarPaperResponse.requestedFields)
         ]
         guard let url = components?.url else {
@@ -104,17 +107,21 @@ actor CitationMetadataResolver: CitationMetadataProviding {
         }
 
         let searchResponse = try JSONDecoder().decode(SemanticScholarSearchResponse.self, from: data)
-        return searchResponse.data
-            .compactMap { $0.toMetadata() }
-            .first
+        return bestMetadataMatch(
+            from: searchResponse.data.compactMap { $0.toMetadata() },
+            candidate: candidate
+        )
     }
 
-    private func searchOpenAlex(query: String) async throws -> CitationMetadata? {
+    private func searchOpenAlex(
+        query: String,
+        candidate: CitationQueryCandidate
+    ) async throws -> CitationMetadata? {
         guard !query.isEmpty else { return nil }
         var components = URLComponents(string: "https://api.openalex.org/works")
         components?.queryItems = [
             URLQueryItem(name: "search", value: query),
-            URLQueryItem(name: "per-page", value: "3")
+            URLQueryItem(name: "per-page", value: "10")
         ]
         guard let url = components?.url else {
             return nil
@@ -127,15 +134,102 @@ actor CitationMetadataResolver: CitationMetadataProviding {
         }
 
         let searchResponse = try JSONDecoder().decode(OpenAlexSearchResponse.self, from: data)
-        return searchResponse.results
-            .compactMap { $0.toMetadata() }
-            .first
+        return bestMetadataMatch(
+            from: searchResponse.results.compactMap { $0.toMetadata() },
+            candidate: candidate
+        )
+    }
+
+    private func bestMetadataMatch(
+        from results: [CitationMetadata],
+        candidate: CitationQueryCandidate
+    ) -> CitationMetadata? {
+        var bestResult: CitationMetadata?
+        var bestScore = Int.min
+
+        for result in results {
+            let score = metadataMatchScore(result, candidate: candidate)
+            if score > bestScore {
+                bestScore = score
+                bestResult = result
+            }
+        }
+
+        return bestScore > 0 ? bestResult : nil
+    }
+
+    private func metadataMatchScore(
+        _ metadata: CitationMetadata,
+        candidate: CitationQueryCandidate
+    ) -> Int {
+        let normalizedResultTitle = CitationTitleNormalizer.normalize(metadata.title)
+        let normalizedCandidateTitle = candidate.normalizedTitle
+        let compactCandidateTitle = candidate.titleCandidate
+
+        var score = 0
+
+        if !normalizedCandidateTitle.isEmpty {
+            if normalizedResultTitle == normalizedCandidateTitle {
+                score += 30
+            } else if normalizedResultTitle.contains(normalizedCandidateTitle)
+                        || normalizedCandidateTitle.contains(normalizedResultTitle) {
+                score += 18
+            } else if !compactCandidateTitle.isEmpty {
+                let candidateTerms = Set(normalizedCandidateTitle.split(separator: " ").map(String.init))
+                let resultTerms = Set(normalizedResultTitle.split(separator: " ").map(String.init))
+                let overlap = candidateTerms.intersection(resultTerms).count
+                if overlap >= min(5, candidateTerms.count) {
+                    score += overlap * 2
+                } else {
+                    score -= 8
+                }
+            }
+        }
+
+        if let authorToken = candidate.authorToken {
+            if metadata.authors.contains(where: {
+                CitationTitleNormalizer.normalize($0.displayName).contains(authorToken)
+            }) {
+                score += 8
+            } else {
+                score -= 5
+            }
+        }
+
+        if let yearToken = candidate.yearToken {
+            let baseYear = String(yearToken.prefix(4))
+            if let year = metadata.year {
+                if String(year).lowercased() == yearToken {
+                    score += 8
+                } else if String(year) == baseYear {
+                    score += 5
+                } else {
+                    score -= 4
+                }
+            } else {
+                score -= 2
+            }
+        }
+
+        if let doi = candidate.doi, metadata.doi?.caseInsensitiveCompare(doi) == .orderedSame {
+            score += 20
+        }
+
+        if let arxivID = candidate.arxivID,
+           metadata.arxivID?.localizedCaseInsensitiveContains(arxivID) == true {
+            score += 20
+        }
+
+        return score
     }
 }
 
 private struct CitationQueryCandidate {
     let rawReference: String
+    let titleCandidate: String
     let normalizedTitle: String
+    let authorToken: String?
+    let yearToken: String?
     let doi: String?
     let arxivID: String?
     let searchQueries: [String]
@@ -165,7 +259,12 @@ private struct CitationQueryCandidate {
             ?? CitationQueryCandidate.extractSentenceLikeTitle(from: reference)
             ?? selection.labelText
 
+        self.titleCandidate = CitationQueryCandidate.cleanReference(titleCandidate)
         normalizedTitle = CitationTitleNormalizer.normalize(titleCandidate)
+        authorToken = CitationQueryCandidate.extractAuthorToken(from: selection.labelText)
+            ?? CitationQueryCandidate.extractAuthorToken(from: reference)
+        yearToken = CitationQueryCandidate.extractYearToken(from: selection.labelText)
+            ?? CitationQueryCandidate.extractYearToken(from: reference)
 
         var queries: [String] = []
         for item in [titleCandidate, reference, selection.labelText] {
@@ -221,6 +320,36 @@ private struct CitationQueryCandidate {
             return sentence
         }
         return nil
+    }
+
+    fileprivate static func extractAuthorToken(from text: String) -> String? {
+        let cleaned = cleanReference(text)
+        let patterns = [
+            #"([A-Z][A-Za-z'’\-]+)\s+et al\."#,
+            #"([A-Z][A-Za-z'’\-]+)\s+and\s+[A-Z][A-Za-z'’\-]+"#,
+            #"^([A-Z][A-Za-z'’\-]+)[,\s]"#
+        ]
+
+        for pattern in patterns {
+            if let match = firstMatch(
+                pattern: pattern,
+                in: cleaned,
+                options: [.caseInsensitive],
+                captureGroup: 1
+            ) {
+                return match.lowercased()
+            }
+        }
+        return nil
+    }
+
+    fileprivate static func extractYearToken(from text: String) -> String? {
+        firstMatch(
+            pattern: #"((?:19|20)\d{2}[a-z]?)"#,
+            in: text,
+            options: [.caseInsensitive],
+            captureGroup: 1
+        )?.lowercased()
     }
 
     fileprivate static func firstMatch(
