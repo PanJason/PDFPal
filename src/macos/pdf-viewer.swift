@@ -1131,6 +1131,7 @@ final class PDFKitView: PDFView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        _ = dismissActiveNoteEditorIfNeeded()
         pendingActionAnnotation = annotation(at: event)
         super.mouseDown(with: event)
     }
@@ -1163,6 +1164,13 @@ final class PDFKitView: PDFView {
         }
 
         super.perform(action)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if dismissActiveNoteEditorIfNeeded() {
+            return
+        }
+        super.cancelOperation(sender)
     }
 
     func updateSearch(query: String, mode: PDFSearchMode) {
@@ -2931,6 +2939,29 @@ final class PDFKitView: PDFView {
                 authorName: base.authorName
             )
         )
+    }
+
+    @discardableResult
+    private func dismissActiveNoteEditorIfNeeded() -> Bool {
+        if let keyWindow = NSApp.keyWindow,
+           keyWindow !== self.window,
+           keyWindow.firstResponder is NSTextView {
+            commitLiveEditingNoteIfNeeded()
+            keyWindow.makeFirstResponder(nil)
+            keyWindow.orderOut(nil)
+            window?.makeFirstResponder(self)
+            return true
+        }
+
+        if let currentWindow = self.window,
+           let textView = currentWindow.firstResponder as? NSTextView,
+           textView.isDescendant(of: self) {
+            commitLiveEditingNoteIfNeeded()
+            currentWindow.makeFirstResponder(self)
+            return true
+        }
+
+        return false
     }
 
     private func goToCitationDestination(_ selection: CitationLinkSelection) {
