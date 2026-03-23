@@ -2380,49 +2380,46 @@ final class PDFKitView: PDFView {
 
     @discardableResult
     private func synchronizeMarkupNoteMarker(for markup: PDFAnnotation, on page: PDFPage) -> Bool {
-        let noteText = noteText(for: markup)
-        let markers = markupNoteMarkers(for: markup, on: page)
+        let markers = candidateMarkupNoteMarkers(for: markup, on: page)
+        let popupNotes = popupNoteCandidates(for: markup, on: page)
+        let popupNote = preferredPopupNoteCandidate(from: popupNotes)
 
-        guard let noteText, !noteText.isEmpty else {
-            var removedAny = false
-            for marker in markers {
-                page.removeAnnotation(marker)
-                removedAny = true
-            }
-            return removedAny
+        let marker: PDFAnnotation
+        let markerWasCreated: Bool
+        if let preferredMarker = preferredMarkupNoteMarker(from: markers) {
+            marker = preferredMarker
+            markerWasCreated = false
+        } else if let popupNote, let popupText = annotationPopupText(popupNote) {
+            let created = makeMarkupNoteMarker(for: markup, on: page)
+            created.contents = popupText
+            page.addAnnotation(created)
+            marker = created
+            markerWasCreated = true
+        } else {
+            return false
         }
 
-        let marker = markers.first ?? makeMarkupNoteMarker(for: markup, on: page)
-        let markerWasNew = markers.isEmpty
+        let markerWasUpdated =
+            (marker.value(forAnnotationKey: .parent) as? PDFAnnotation) == nil
+            || !boundsAreClose(marker.bounds, markupNoteMarkerBounds(for: markup, on: page))
+
+        _ = marker.setValue(markup, forAnnotationKey: .parent)
         normalizeMarkupNoteAnnotation(marker, targetMarkup: markup)
-        marker.contents = noteText
         marker.bounds = markupNoteMarkerBounds(for: markup, on: page)
 
-        if markerWasNew {
-            page.addAnnotation(marker)
-        }
-
         if markers.count > 1 {
-            for extraMarker in markers.dropFirst() {
-                page.removeAnnotation(extraMarker)
+            for extraMarker in markers where extraMarker !== marker {
+                removeAnnotationAndRelatedNotes(extraMarker, from: page, notifyChange: false)
             }
         }
 
-        return markerWasNew || markers.count > 1
-    }
-
-    private func noteText(for markup: PDFAnnotation) -> String? {
-        let directContents = markup.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !directContents.isEmpty {
-            return directContents
+        if !popupNotes.isEmpty {
+            for popup in popupNotes {
+                page.removeAnnotation(popup)
+            }
         }
 
-        let popupContents = markup.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !popupContents.isEmpty {
-            return popupContents
-        }
-
-        return nil
+        return markerWasCreated || markerWasUpdated || markers.count > 1 || !popupNotes.isEmpty
     }
 
     private func markupNoteMarkers(for markup: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
@@ -2437,6 +2434,51 @@ final class PDFKitView: PDFView {
         }
     }
 
+    private func candidateMarkupNoteMarkers(for markup: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        var markers = markupNoteMarkers(for: markup, on: page)
+        markers.append(contentsOf: nearbyStandaloneMarkupNoteMarkers(for: markup, on: page))
+
+        var seen = Set<ObjectIdentifier>()
+        return markers.filter { seen.insert(ObjectIdentifier($0)).inserted }
+    }
+
+    private func popupNoteCandidates(for markup: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        let markerBounds = markupNoteMarkerBounds(for: markup, on: page)
+        let markerCenter = CGPoint(x: markerBounds.midX, y: markerBounds.midY)
+
+        return page.annotations.filter { annotation in
+            let typeName = (annotation.type ?? "").lowercased()
+            guard typeName.contains("popup") else { return false }
+            guard annotationPopupText(annotation)?.isEmpty == false else { return false }
+
+            let dx = annotation.bounds.midX - markerCenter.x
+            let dy = annotation.bounds.midY - markerCenter.y
+            let distance = sqrt((dx * dx) + (dy * dy))
+            return distance <= 40
+        }
+    }
+
+    private func nearbyStandaloneMarkupNoteMarkers(for markup: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        let expectedBounds = markupNoteMarkerBounds(for: markup, on: page)
+        let expectedCenter = CGPoint(x: expectedBounds.midX, y: expectedBounds.midY)
+
+        return page.annotations.filter { annotation in
+            let typeName = (annotation.type ?? "").lowercased()
+            guard typeName.contains("text") else { return false }
+            guard (annotation.value(forAnnotationKey: .parent) as? PDFAnnotation) == nil else { return false }
+            guard annotationNoteText(annotation)?.isEmpty == false else { return false }
+
+            if boundsAreClose(annotation.bounds, expectedBounds) {
+                return true
+            }
+
+            let dx = annotation.bounds.midX - expectedCenter.x
+            let dy = annotation.bounds.midY - expectedCenter.y
+            let distance = sqrt((dx * dx) + (dy * dy))
+            return distance <= 24
+        }
+    }
+
     private func makeMarkupNoteMarker(for markup: PDFAnnotation, on page: PDFPage) -> PDFAnnotation {
         let marker = PDFAnnotation(
             bounds: markupNoteMarkerBounds(for: markup, on: page),
@@ -2445,6 +2487,14 @@ final class PDFKitView: PDFView {
         )
         _ = marker.setValue(markup, forAnnotationKey: .parent)
         return marker
+    }
+
+    private func preferredPopupNoteCandidate(from popups: [PDFAnnotation]) -> PDFAnnotation? {
+        popups
+            .filter { annotationPopupText($0)?.isEmpty == false }
+            .max { lhs, rhs in
+                preferredMarkupNoteMarkerSortKey(lhs) < preferredMarkupNoteMarkerSortKey(rhs)
+            }
     }
 
     private func markupNoteMarkerBounds(for markup: PDFAnnotation, on page: PDFPage) -> CGRect {
@@ -2473,32 +2523,47 @@ final class PDFKitView: PDFView {
         }
     }
 
-    private func noteText(forMarkupCluster cluster: [PDFAnnotation], on page: PDFPage) -> String? {
-        for markup in cluster {
-            let directContents = markup.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !directContents.isEmpty {
-                return directContents
-            }
-
-            let popupContents = markup.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !popupContents.isEmpty {
-                return popupContents
-            }
+    private func annotationNoteText(_ annotation: PDFAnnotation) -> String? {
+        let directContents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !directContents.isEmpty {
+            return directContents
         }
 
-        for marker in markupNoteMarkers(forMarkupCluster: cluster, on: page) {
-            let markerContents = marker.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !markerContents.isEmpty {
-                return markerContents
-            }
-
-            let popupContents = marker.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !popupContents.isEmpty {
-                return popupContents
-            }
+        let popupContents = annotation.popup?.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !popupContents.isEmpty {
+            return popupContents
         }
 
         return nil
+    }
+
+    private func annotationPopupText(_ annotation: PDFAnnotation) -> String? {
+        let popupContents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return popupContents.isEmpty ? nil : popupContents
+    }
+
+    private func preferredMarkupNoteMarker(from markers: [PDFAnnotation]) -> PDFAnnotation? {
+        markers
+            .filter { annotationNoteText($0)?.isEmpty == false }
+            .max { lhs, rhs in
+                preferredMarkupNoteMarkerSortKey(lhs) < preferredMarkupNoteMarkerSortKey(rhs)
+            }
+    }
+
+    private func preferredMarkupNoteMarkerSortKey(_ annotation: PDFAnnotation) -> (Date, Int) {
+        let modificationDate = annotation.modificationDate ?? .distantPast
+        let textLength = annotationNoteText(annotation)?.count ?? 0
+        return (modificationDate, textLength)
+    }
+
+    private func noteText(forMarkupCluster cluster: [PDFAnnotation], on page: PDFPage) -> String? {
+        let markers = cluster.flatMap { candidateMarkupNoteMarkers(for: $0, on: page) }
+        if let markerText = preferredMarkupNoteMarker(from: markers).flatMap(annotationNoteText) {
+            return markerText
+        }
+
+        let popups = cluster.flatMap { popupNoteCandidates(for: $0, on: page) }
+        return preferredPopupNoteCandidate(from: popups).flatMap(annotationPopupText)
     }
 
     private func markupNoteMarkers(forMarkupCluster cluster: [PDFAnnotation], on page: PDFPage) -> [PDFAnnotation] {
@@ -2513,10 +2578,16 @@ final class PDFKitView: PDFView {
 
     private func removeNote(forMarkupCluster cluster: [PDFAnnotation], on page: PDFPage) {
         var changedAny = false
-        let markers = markupNoteMarkers(forMarkupCluster: cluster, on: page)
+        let markers = cluster.flatMap { candidateMarkupNoteMarkers(for: $0, on: page) }
+        let popups = cluster.flatMap { popupNoteCandidates(for: $0, on: page) }
 
         for marker in markers {
             removeAnnotationAndRelatedNotes(marker, from: page, notifyChange: false)
+            changedAny = true
+        }
+
+        for popup in popups {
+            page.removeAnnotation(popup)
             changedAny = true
         }
 
