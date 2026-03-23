@@ -2404,6 +2404,9 @@ final class PDFKitView: PDFView {
             page.addAnnotation(created)
             marker = created
             markerWasCreated = true
+            if markupNoteText == nil {
+                anchor.contents = popupText
+            }
         } else if let markupNoteText {
             let created = makeMarkupNoteMarker(for: anchor, on: page)
             created.contents = markupNoteText
@@ -2431,6 +2434,9 @@ final class PDFKitView: PDFView {
         if !popupNotes.isEmpty {
             for popup in popupNotes {
                 page.removeAnnotation(popup)
+            }
+            for markup in resolvedCluster where markup.popup != nil {
+                markup.popup = nil
             }
         }
 
