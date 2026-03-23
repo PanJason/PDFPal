@@ -203,6 +203,10 @@ struct PDFEmptyState: View {}
 - When no existing markup is under the context click, the same controls apply
   the requested annotation style to the current text selection.
 - Note editing still uses PDFKit's native add-note UI.
+- When `Add Note` is invoked on a markup annotation, the viewer immediately
+  seeds an empty annotation-preview selection before PDFKit commits the first
+  note text. This allows live note typing to render in the right-side preview
+  panel on the first open instead of only after closing and reopening the note.
 - For grouped multi-line highlights, note presence is resolved at the highlight
   cluster level. If any line in the group has a note, right-clicking any line in
   that group exposes `Remove Note` rather than `Add Note`.
