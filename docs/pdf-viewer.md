@@ -168,10 +168,29 @@ struct PDFEmptyState: View {}
 - Grouped multi-line markup is collapsed into a single sidebar entry so one
   logical highlight does not appear as several rows.
 - For grouped multi-line highlights, sidebar note text is resolved across the
-  whole highlight cluster, including note-marker and popup-backed note content
-  that PDFKit may attach to only one line of the group.
+  whole highlight cluster, including note-marker, popup-backed, and persisted
+  highlight-comment note content that PDFKit may attach to only one line of the
+  group.
 - The sidebar refreshes when highlights, underlines, strikethroughs, colors, or
   note content change while the mode is visible.
+
+## Note Persistence Behavior
+- The app uses a split note model:
+  saved PDF note text is persisted on the anchor markup annotation's
+  `contents`, while the visible note icon shown inside this app is rebuilt as a
+  local text-note marker during normalization.
+- This avoids writing a standalone text-note annotation for app-authored notes,
+  which Preview would otherwise treat as a second unattached note.
+- On save, synthetic note markers and transient popup remnants are removed from
+  the written PDF. The single persisted source of truth is the anchor
+  highlight/underline/strike annotation's `contents`.
+- On load, if a markup annotation already carries note text in `contents`, the
+  viewer recreates one local note marker so in-app note affordances remain
+  visible.
+- Preview-authored notes are also adopted into this model. If a native Preview
+  popup is attached to a markup annotation, the viewer copies that note text
+  onto the markup annotation, clears the native popup linkage, and keeps only
+  one local note marker in-app so duplicate icons are suppressed.
 
 ## Context Menu Markup Picker
 - The annotation context menu keeps a compact first-row markup picker for
@@ -188,7 +207,8 @@ struct PDFEmptyState: View {}
   cluster level. If any line in the group has a note, right-clicking any line in
   that group exposes `Remove Note` rather than `Add Note`.
 - Removing a note from a grouped highlight clears the related note marker,
-  popup, and sidebar note state for the whole grouped highlight.
+  popup, persisted markup comment, and sidebar note state for the whole grouped
+  highlight.
 - Clicking directly on a note marker or markup annotation in the PDF view
   publishes the corresponding note text to the preview panel when note content
   exists.
