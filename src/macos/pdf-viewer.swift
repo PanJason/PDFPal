@@ -1810,6 +1810,12 @@ final class PDFKitView: PDFView {
         window?.makeFirstResponder(self)
         _ = NSApp.sendAction(NSSelectorFromString("_addNote:"), to: nil, from: sender)
 
+        if let targetMarkup,
+           isRemovableMarkup(targetMarkup),
+           let targetPage {
+            beginPendingMarkupNoteSelection(for: targetMarkup, on: targetPage)
+        }
+
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.normalizeRelatedNoteColors(on: targetPage, targetMarkup: targetMarkup)
@@ -2923,6 +2929,29 @@ final class PDFKitView: PDFView {
             authorName: target.authorName
         )
         lastPublishedSelectionBase = selection
+        onAnnotationSelectionChanged?(selection)
+    }
+
+    private func beginPendingMarkupNoteSelection(for markup: PDFAnnotation, on page: PDFPage) {
+        let cluster = markupCluster(for: markup, on: page)
+        let resolvedCluster = cluster.isEmpty ? [markup] : cluster
+        let bounds = resolvedCluster.reduce(markup.bounds) { partialResult, item in
+            partialResult.union(item.bounds)
+        }
+        let documentPath = document?.documentURL?.path ?? ""
+        let pageIndex = document.flatMap { $0.index(for: page) } ?? 0
+        let selection = AnnotationRenderSelection(
+            documentPath: documentPath,
+            pageIndex: pageIndex,
+            annotationBounds: bounds,
+            rawText: "",
+            authorName: authorName(for: resolvedCluster)
+        )
+        activeAnnotation = markup
+        activeFallbackPage = page
+        lastPublishedNoteContents = ""
+        lastPublishedSelectionBase = selection
+        startActiveAnnotationMonitoring()
         onAnnotationSelectionChanged?(selection)
     }
 
