@@ -1081,6 +1081,13 @@ final class PDFKitView: PDFView {
     private var lastPublishedNoteContents: String = ""
     private var activeAnnotationMonitorTimer: Timer?
     private var lastPublishedSelectionBase: AnnotationRenderSelection?
+    private var wasLiveEditingNoteVisible = false
+    private var observedNoteEditorWindow: NSWindow?
+    private var noteEditorWindowObserver: NSObjectProtocol?
+    private var observedNoteEditorTextView: NSTextView?
+    private var noteEditorTextObserver: NSObjectProtocol?
+    private let noteEditorMonitorInterval: TimeInterval = 0.05
+    private let noteEditorNormalizationFollowUpDelay: TimeInterval = 0.04
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1103,6 +1110,7 @@ final class PDFKitView: PDFView {
     deinit {
         pendingModeApplyWorkItem?.cancel()
         activeAnnotationMonitorTimer?.invalidate()
+        removeObservedNoteEditorArtifacts()
         if let annotationObserver {
             NotificationCenter.default.removeObserver(annotationObserver)
         }
@@ -1818,7 +1826,12 @@ final class PDFKitView: PDFView {
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.normalizeRelatedNoteColors(on: targetPage, targetMarkup: targetMarkup)
+            self.observeActiveNoteEditorWindowIfNeeded()
+            self.normalizeRelatedNoteColors(
+                on: targetPage,
+                targetMarkup: targetMarkup,
+                synchronizeTargetMarker: false
+            )
             self.notifyAnnotationsDidChange()
         }
     }
@@ -2331,21 +2344,22 @@ final class PDFKitView: PDFView {
         }
     }
 
-    private func normalizeRelatedNoteColors(on page: PDFPage?, targetMarkup: PDFAnnotation?) {
+    private func normalizeRelatedNoteColors(
+        on page: PDFPage?,
+        targetMarkup: PDFAnnotation?,
+        synchronizeTargetMarker: Bool = true
+    ) {
         guard let page else { return }
 
         for annotation in page.annotations {
             let typeName = (annotation.type ?? "").lowercased()
             guard typeName.contains("text") || typeName.contains("popup") else { continue }
 
-            let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation
-            let popupParent = annotation.value(forAnnotationKey: .popup) as? PDFAnnotation
-
+            let linkedMarkup = linkedMarkupAnnotation(for: annotation)
             let isRelatedToTarget =
-                (targetMarkup != nil && (parent === targetMarkup || popupParent === targetMarkup))
-                || (targetMarkup != nil && parent.map { annotationsLikelySame($0, targetMarkup!) } == true)
-
-            let isMarkupNote = parent.map(isRemovableMarkup) ?? false
+                targetMarkup != nil
+                && linkedMarkup.map { $0 === targetMarkup || annotationsLikelySame($0, targetMarkup!) } == true
+            let isMarkupNote = linkedMarkup != nil
 
             guard isRelatedToTarget || isMarkupNote else { continue }
 
@@ -2358,7 +2372,7 @@ final class PDFKitView: PDFView {
         if let popup = targetMarkup?.popup {
             popup.color = NSColor.white
         }
-        if let targetMarkup {
+        if synchronizeTargetMarker, let targetMarkup {
             _ = synchronizeMarkupNoteMarker(for: targetMarkup, on: page)
         }
 
@@ -2366,11 +2380,8 @@ final class PDFKitView: PDFView {
     }
 
     private func relatedNoteMarkerColor(for annotation: PDFAnnotation, targetMarkup: PDFAnnotation?) -> NSColor {
-        if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation {
-            return parent.color.withAlphaComponent(1.0)
-        }
-        if let popupParent = annotation.value(forAnnotationKey: .popup) as? PDFAnnotation {
-            return popupParent.color.withAlphaComponent(1.0)
+        if let linkedMarkup = linkedMarkupAnnotation(for: annotation) {
+            return linkedMarkup.color.withAlphaComponent(1.0)
         }
         if let targetMarkup {
             return targetMarkup.color.withAlphaComponent(1.0)
@@ -2461,11 +2472,7 @@ final class PDFKitView: PDFView {
         page.annotations.filter { annotation in
             let typeName = (annotation.type ?? "").lowercased()
             guard typeName.contains("text") else { return false }
-
-            if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation {
-                return parent === markup || annotationsLikelySame(parent, markup)
-            }
-            return false
+            return annotationLinksToMarkup(annotation, markup: markup)
         }
     }
 
@@ -2508,7 +2515,7 @@ final class PDFKitView: PDFView {
         return page.annotations.filter { annotation in
             let typeName = (annotation.type ?? "").lowercased()
             guard typeName.contains("text") else { return false }
-            guard (annotation.value(forAnnotationKey: .parent) as? PDFAnnotation) == nil else { return false }
+            guard linkedMarkupAnnotation(for: annotation) == nil else { return false }
             guard annotationNoteText(annotation)?.isEmpty == false else { return false }
 
             if boundsAreClose(annotation.bounds, expectedBounds) {
@@ -2520,6 +2527,37 @@ final class PDFKitView: PDFView {
             let distance = sqrt((dx * dx) + (dy * dy))
             return distance <= 24
         }
+    }
+
+    private func linkedMarkupAnnotation(for annotation: PDFAnnotation) -> PDFAnnotation? {
+        if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation,
+           isRemovableMarkup(parent) {
+            return parent
+        }
+        if let popupRef = annotation.value(forAnnotationKey: .popup) as? PDFAnnotation {
+            if isRemovableMarkup(popupRef) {
+                return popupRef
+            }
+            if let popupParent = popupRef.value(forAnnotationKey: .parent) as? PDFAnnotation,
+               isRemovableMarkup(popupParent) {
+                return popupParent
+            }
+            if let page = annotation.page ?? popupRef.page {
+                if let owner = page.annotations.first(where: { candidate in
+                    guard isRemovableMarkup(candidate) else { return false }
+                    guard let candidatePopup = candidate.popup else { return false }
+                    return candidatePopup === popupRef || annotationsLikelySame(candidatePopup, popupRef)
+                }) {
+                    return owner
+                }
+            }
+        }
+        return nil
+    }
+
+    private func annotationLinksToMarkup(_ annotation: PDFAnnotation, markup: PDFAnnotation) -> Bool {
+        guard let linkedMarkup = linkedMarkupAnnotation(for: annotation) else { return false }
+        return linkedMarkup === markup || annotationsLikelySame(linkedMarkup, markup)
     }
 
     private func makeMarkupNoteMarker(for markup: PDFAnnotation, on page: PDFPage) -> PDFAnnotation {
@@ -2849,6 +2887,7 @@ final class PDFKitView: PDFView {
             activeFallbackPage = nil
             lastPublishedNoteContents = ""
             lastPublishedSelectionBase = nil
+            wasLiveEditingNoteVisible = false
             stopActiveAnnotationMonitoring()
             onAnnotationSelectionChanged?(nil)
             return
@@ -2872,7 +2911,7 @@ final class PDFKitView: PDFView {
 
     private func startActiveAnnotationMonitoring() {
         guard activeAnnotationMonitorTimer == nil else { return }
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: noteEditorMonitorInterval, repeats: true) { [weak self] _ in
             self?.pollActiveAnnotationNote()
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -2882,6 +2921,8 @@ final class PDFKitView: PDFView {
     private func stopActiveAnnotationMonitoring() {
         activeAnnotationMonitorTimer?.invalidate()
         activeAnnotationMonitorTimer = nil
+        wasLiveEditingNoteVisible = false
+        removeObservedNoteEditorArtifacts()
     }
 
     // Returns the live string from whichever NSTextView PDFKit is using to
@@ -2910,8 +2951,17 @@ final class PDFKitView: PDFView {
         // While the PDFKit popup/inline editor is open, read live text from the
         // first responder — annotation.contents is only committed on popup close.
         if let live = liveEditingText() {
+            wasLiveEditingNoteVisible = true
+            observeActiveNoteEditorWindowIfNeeded()
             publishNoteContentsUpdate(live)
             return
+        }
+        if wasLiveEditingNoteVisible {
+            wasLiveEditingNoteVisible = false
+            normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: activeFallbackPage)
+            DispatchQueue.main.asyncAfter(deadline: .now() + noteEditorNormalizationFollowUpDelay) { [weak self] in
+                self?.normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: self?.activeFallbackPage)
+            }
         }
         // Popup is closed — fall back to committed annotation.contents.
         guard let target = resolvedAnnotationRenderTarget(for: annotation, fallbackPage: activeFallbackPage) else {
@@ -2991,6 +3041,113 @@ final class PDFKitView: PDFView {
         }
 
         return false
+    }
+
+    private func observeActiveNoteEditorWindowIfNeeded() {
+        if let textView = activeNoteEditorTextView() {
+            if observedNoteEditorTextView !== textView {
+                if let noteEditorTextObserver {
+                    NotificationCenter.default.removeObserver(noteEditorTextObserver)
+                    self.noteEditorTextObserver = nil
+                }
+                observedNoteEditorTextView = textView
+                noteEditorTextObserver = NotificationCenter.default.addObserver(
+                    forName: NSText.didEndEditingNotification,
+                    object: textView,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.handleObservedNoteEditorWindowClosed()
+                }
+            }
+        }
+
+        guard let keyWindow = NSApp.keyWindow,
+              keyWindow !== self.window,
+              keyWindow.firstResponder is NSTextView
+        else {
+            return
+        }
+
+        guard observedNoteEditorWindow !== keyWindow else { return }
+        if let noteEditorWindowObserver {
+            NotificationCenter.default.removeObserver(noteEditorWindowObserver)
+            self.noteEditorWindowObserver = nil
+        }
+        observedNoteEditorWindow = keyWindow
+        noteEditorWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: keyWindow,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleObservedNoteEditorWindowClosed()
+        }
+    }
+
+    private func activeNoteEditorTextView() -> NSTextView? {
+        if let keyWindow = NSApp.keyWindow,
+           keyWindow !== self.window,
+           let textView = keyWindow.firstResponder as? NSTextView {
+            return textView
+        }
+        if let textView = self.window?.firstResponder as? NSTextView,
+           textView.isDescendant(of: self) {
+            return textView
+        }
+        return nil
+    }
+
+    private func removeObservedNoteEditorArtifacts() {
+        if let noteEditorWindowObserver {
+            NotificationCenter.default.removeObserver(noteEditorWindowObserver)
+            self.noteEditorWindowObserver = nil
+        }
+        if let noteEditorTextObserver {
+            NotificationCenter.default.removeObserver(noteEditorTextObserver)
+            self.noteEditorTextObserver = nil
+        }
+        observedNoteEditorWindow = nil
+        observedNoteEditorTextView = nil
+    }
+
+    private func handleObservedNoteEditorWindowClosed() {
+        removeObservedNoteEditorArtifacts()
+        guard let annotation = activeAnnotation else { return }
+        wasLiveEditingNoteVisible = false
+
+        normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: activeFallbackPage)
+        DispatchQueue.main.asyncAfter(deadline: .now() + noteEditorNormalizationFollowUpDelay) { [weak self] in
+            self?.normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: self?.activeFallbackPage)
+        }
+    }
+
+    private func normalizeCommittedMarkupNoteIfNeeded(for annotation: PDFAnnotation, fallbackPage: PDFPage?) {
+        let markup: PDFAnnotation?
+        let page: PDFPage?
+
+        if isRemovableMarkup(annotation) {
+            markup = annotation
+            page = annotation.page ?? fallbackPage
+        } else if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation,
+                  isRemovableMarkup(parent) {
+            markup = parent
+            page = parent.page ?? annotation.page ?? fallbackPage
+        } else {
+            markup = nil
+            page = nil
+        }
+
+        guard let markup, let page else { return }
+        let cluster = markupCluster(for: markup, on: page)
+        let resolvedCluster = cluster.isEmpty ? [markup] : cluster
+        guard let anchor = resolvedCluster.first else { return }
+
+        collapseMarkupNoteForSave(cluster: resolvedCluster, on: page)
+        _ = synchronizeMarkupNoteMarker(for: anchor, on: page)
+        activeAnnotation = anchor
+        activeFallbackPage = page
+        refreshAnnotationRendering(on: page)
+        publishAnnotationSelection(for: anchor, fallbackPage: page)
+        notifyAnnotationsDidChange()
     }
 
     private func goToCitationDestination(_ selection: CitationLinkSelection) {
