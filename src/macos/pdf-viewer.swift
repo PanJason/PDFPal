@@ -3700,7 +3700,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         var leftIndex = seedIndex - 1
         while leftIndex >= 0 {
             let candidate = candidates[leftIndex]
-            guard citationAnnotationsAreAdjacent(candidate, cluster.first!) else { break }
+            guard citationAnnotationsAreAdjacent(candidate, cluster.first!, on: page) else { break }
             cluster.insert(candidate, at: 0)
             leftIndex -= 1
         }
@@ -3708,7 +3708,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         var rightIndex = seedIndex + 1
         while rightIndex < candidates.count {
             let candidate = candidates[rightIndex]
-            guard citationAnnotationsAreAdjacent(cluster.last!, candidate) else { break }
+            guard citationAnnotationsAreAdjacent(cluster.last!, candidate, on: page) else { break }
             cluster.append(candidate)
             rightIndex += 1
         }
@@ -3716,10 +3716,31 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         return cluster
     }
 
-    private func citationAnnotationsAreAdjacent(_ lhs: PDFAnnotation, _ rhs: PDFAnnotation) -> Bool {
+    private func citationAnnotationsAreAdjacent(
+        _ lhs: PDFAnnotation,
+        _ rhs: PDFAnnotation,
+        on page: PDFPage
+    ) -> Bool {
         let verticalGap = abs(lhs.bounds.midY - rhs.bounds.midY)
         let horizontalGap = rhs.bounds.minX - lhs.bounds.maxX
-        return verticalGap <= 4 && horizontalGap <= 18
+        if verticalGap <= 4 && horizontalGap <= 18 {
+            return true
+        }
+
+        let lineDrop = lhs.bounds.midY - rhs.bounds.midY
+        guard lineDrop > 4, lineDrop <= 26 else { return false }
+
+        let lhsText = cleanCitationText(citationLabelText(for: lhs, on: page))
+        let rhsText = cleanCitationText(citationLabelText(for: rhs, on: page))
+        guard !lhsText.isEmpty, !rhsText.isEmpty else { return false }
+
+        let rhsLooksLikeContinuation = rhsText.range(
+            of: #"^(?:et\b|al\b|and\b|[a-z]|[,;.)]|(?:19|20)\d{2}[a-z]?)"#,
+            options: .regularExpression
+        ) != nil
+        let lhsLooksComplete = looksLikeCitationLabel(lhsText)
+
+        return rhsLooksLikeContinuation && !lhsLooksComplete
     }
 
     private func citationDestinationSignature(
