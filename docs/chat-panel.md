@@ -6,7 +6,10 @@ shows the selected PDF context, a scrollable message list, an input composer,
 and UI states for loading and errors with retry. It includes a model picker,
 API key prompt, per-provider session selection sidebar (OpenAI, Claude,
 Gemini, Qwen), and streaming updates from the LLM service. A hover-only fold control
-lets the user hide or show the session sidebar.
+lets the user hide or show the session sidebar. The composer now also supports
+OpenAI-only rich input actions that mirror the desktop ChatGPT app: attachment
+insertion from a `+` menu, removable attachment chips with Quick Look, and a
+web-search toggle rendered as a pill when enabled.
 
 ## Public API
 ```swift
@@ -23,7 +26,9 @@ lets the user hide or show the session sidebar.
  * and input composer. Streams responses from the LLM service and prompts
  * for an API key when needed. Displays a session sidebar for switching
  * between sessions within the current model family. The sidebar can be
- * collapsed with a hover-only fold control.
+ * collapsed with a hover-only fold control. For OpenAI models, the composer
+ * supports file uploads, image uploads, screenshots, camera capture, and
+ * web-search-enabled requests.
  *
  * Example:
  *     ChatPanel(
@@ -99,6 +104,12 @@ struct LLMModel: Identifiable {}
 - The context card includes a toggle to include or omit context text from
   LLM requests. When enabled, either selection or context must be present.
   When disabled, only the typed prompt is sent.
+- The composer tracks pending attachments separately from the saved session.
+  Attachments are shown as removable chips above the input box and are cleared
+  after a successful send or when the active session changes.
+- The web search control is transient UI state. When enabled for OpenAI models,
+  the globe expands into a rounded search pill and the outgoing request opts
+  into provider-side web search.
 - Assistant messages align to the left, while user messages align to the right.
 - User messages that include context show a context icon on the bubble. Tapping
   the icon reveals the stored context beneath the message.
@@ -121,9 +132,17 @@ struct LLMModel: Identifiable {}
 - For OpenAI, Claude, and Gemini sessions, the panel uploads the session PDF
   to the provider Files API before the first prompt, stores the returned
   `fileID` in the session, and reuses it for later prompts.
+- For OpenAI models, the composer can upload additional files and images as
+  per-message attachments. Files are uploaded through `OpenAIFileClient` and
+  sent as `LLMAttachment` entries on the request.
+- The OpenAI composer also exposes a web-search toggle. When enabled, the
+  request includes the provider's web-search preview tool.
 - Deleting an OpenAI, Claude, or Gemini session also attempts to delete its
   uploaded file from the provider Files API.
 - Qwen sessions do not upload files; `LLMRequest.fileID` is always nil for Qwen.
+- The rich composer controls are currently implemented for OpenAI only. Other
+  providers keep the same base chat UI but do not enable attachment upload or
+  web search yet.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples
