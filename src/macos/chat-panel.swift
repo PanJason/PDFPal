@@ -1,5 +1,8 @@
 import AppKit
+import AVFoundation
+import QuickLook
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ChatPanel: View {
     let documentId: String
@@ -25,6 +28,10 @@ struct ChatPanel: View {
     @State private var sessionSidebarWidth: CGFloat = 220
     @State private var isHoveringSidebarDivider = false
     @State private var includeContextInRequest = true
+    @State private var pendingAttachments: [PendingChatAttachment] = []
+    @State private var quickLookURL: URL? = nil
+    @State private var isWebSearchEnabled = false
+    @State private var isPresentingCameraCapture = false
 
     init(
         documentId: String,
@@ -99,6 +106,14 @@ struct ChatPanel: View {
                 onCancel: { isShowingKeyPrompt = false }
             )
         }
+        .sheet(isPresented: $isPresentingCameraCapture) {
+            CameraCaptureSheet { imageURL in
+                isPresentingCameraCapture = false
+                guard let imageURL else { return }
+                addAttachment(from: imageURL, preferredKind: .image)
+            }
+        }
+        .quickLookPreview($quickLookURL)
         .onDisappear {
             cancelStream()
         }
@@ -248,6 +263,9 @@ struct ChatPanel: View {
 
     private var inputBar: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !pendingAttachments.isEmpty {
+                attachmentStrip
+            }
             ZStack(alignment: .topLeading) {
                 if inputText.isEmpty {
                     Text("Ask a question or add more context...")
@@ -264,9 +282,8 @@ struct ChatPanel: View {
             )
 
             HStack {
-                Text("Cmd-Return to send")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
+                attachmentMenu
+                webSearchButton
                 Spacer()
                 Button("Send") {
                     sendMessage()
@@ -275,6 +292,77 @@ struct ChatPanel: View {
                 .disabled(isSendDisabled)
             }
         }
+    }
+
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(pendingAttachments) { attachment in
+                    PendingAttachmentChip(
+                        attachment: attachment,
+                        onOpen: { quickLookURL = attachment.fileURL },
+                        onRemove: { removeAttachment(attachment.id) }
+                    )
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private var attachmentMenu: some View {
+        Menu {
+            Button("Upload file") {
+                pickAttachmentFile(allowedTypes: nil, preferredKind: .file)
+            }
+            .disabled(!supportsRichInput)
+
+            Button("Upload photo") {
+                pickAttachmentFile(allowedTypes: [.image], preferredKind: .image)
+            }
+            .disabled(!supportsRichInput)
+
+            Button("Take screenshot") {
+                captureScreenshotAttachment()
+            }
+            .disabled(!supportsRichInput)
+
+            Button("Take photo") {
+                isPresentingCameraCapture = true
+            }
+            .disabled(!supportsRichInput)
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 18, weight: .medium))
+                .frame(width: 28, height: 28)
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var webSearchButton: some View {
+        Button {
+            if supportsWebSearch {
+                isWebSearchEnabled.toggle()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "globe")
+                    .font(.system(size: 15, weight: .medium))
+                if isWebSearchEnabled {
+                    Text("Search")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            }
+            .foregroundColor(isWebSearchEnabled ? .accentColor : .secondary)
+            .padding(.horizontal, isWebSearchEnabled ? 10 : 4)
+            .frame(height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isWebSearchEnabled ? Color.accentColor.opacity(0.14) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!supportsWebSearch)
+        .help(supportsWebSearch ? "Enable web search" : "Web search not available for this provider yet")
     }
 
     private var sessionSidebar: some View {
@@ -344,9 +432,17 @@ struct ChatPanel: View {
 
     private var isSendDisabled: Bool {
         if isSending { return true }
-        if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingAttachments.isEmpty { return true }
         if selectedModel.isCustom && resolvedModelId() == nil { return true }
         return false
+    }
+
+    private var supportsRichInput: Bool {
+        selectedModel.provider == .openAI
+    }
+
+    private var supportsWebSearch: Bool {
+        selectedModel.provider == .openAI
     }
 
     private var contextText: String {
@@ -357,7 +453,7 @@ struct ChatPanel: View {
 
     private func sendMessage() {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard !trimmed.isEmpty || !pendingAttachments.isEmpty else {
             errorMessage = "Enter a message before sending."
             retryPrompt = nil
             return
@@ -365,7 +461,7 @@ struct ChatPanel: View {
 
         guard validateModelSelection() else { return }
         inputText = ""
-        startStreaming(prompt: trimmed, appendUserMessage: true)
+        startStreaming(prompt: trimmed.isEmpty ? "Please analyze the attached content." : trimmed, appendUserMessage: true)
     }
 
     private func retrySend() {
@@ -392,6 +488,14 @@ struct ChatPanel: View {
         }
 
         guard ensureAPIKeyAvailable(for: selectedModel) else { return false }
+        if !supportsRichInput, !pendingAttachments.isEmpty {
+            errorMessage = "Attachments are only implemented for OpenAI models right now."
+            return false
+        }
+        if !supportsWebSearch, isWebSearchEnabled {
+            errorMessage = "Web search is only implemented for OpenAI models right now."
+            return false
+        }
         return true
     }
 
@@ -418,7 +522,9 @@ struct ChatPanel: View {
             documentId: documentId,
             userPrompt: prompt,
             context: contextForMessage,
-            fileID: nil
+            fileID: nil,
+            attachments: [],
+            webSearchEnabled: supportsWebSearch && isWebSearchEnabled
         )
         let client = makeClient(for: selectedModel, modelId: modelId)
         let sessionId = sessionStore.activeSessionId
@@ -426,12 +532,18 @@ struct ChatPanel: View {
         streamTask = Task {
             do {
                 let fileID = try await ensureFileIDIfNeeded(sessionId: sessionId, model: selectedModel)
+                let attachments = try await uploadPendingAttachmentsIfNeeded(model: selectedModel)
                 let requestWithFile = LLMRequest(
                     documentId: request.documentId,
                     userPrompt: request.userPrompt,
                     context: request.context,
-                    fileID: fileID
+                    fileID: fileID,
+                    attachments: attachments,
+                    webSearchEnabled: request.webSearchEnabled
                 )
+                await MainActor.run {
+                    pendingAttachments = []
+                }
 
                 for try await event in client.stream(request: requestWithFile) {
                     try Task.checkCancellation()
@@ -715,6 +827,8 @@ struct ChatPanel: View {
         cancelStream()
         errorMessage = nil
         retryPrompt = nil
+        pendingAttachments = []
+        isWebSearchEnabled = false
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
@@ -753,6 +867,432 @@ struct ChatPanel: View {
             sessionStore.updateSessionFileID(sessionId, fileID: fileID)
         }
         return fileID
+    }
+
+    private func pickAttachmentFile(allowedTypes: [UTType]?, preferredKind: PendingChatAttachment.Kind) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.resolvesAliases = true
+        if let allowedTypes {
+            panel.allowedContentTypes = allowedTypes
+        }
+        if panel.runModal() == .OK {
+            for url in panel.urls {
+                addAttachment(from: url, preferredKind: preferredKind)
+            }
+        }
+    }
+
+    private func captureScreenshotAttachment() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "LLMPaperReadingHelper",
+            isDirectory: true
+        )
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let outputURL = directory.appendingPathComponent("screenshot-\(UUID().uuidString).png")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-i", outputURL.path]
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            errorMessage = "Unable to launch screenshot capture."
+            return
+        }
+
+        guard process.terminationStatus == 0,
+              FileManager.default.fileExists(atPath: outputURL.path),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
+              let fileSize = attributes[.size] as? NSNumber,
+              fileSize.intValue > 0
+        else {
+            try? FileManager.default.removeItem(at: outputURL)
+            return
+        }
+
+        addAttachment(from: outputURL, preferredKind: .image)
+    }
+
+    private func addAttachment(from url: URL, preferredKind: PendingChatAttachment.Kind) {
+        let kind = attachmentKind(for: url, preferred: preferredKind)
+        let attachment = PendingChatAttachment(fileURL: url, kind: kind)
+        guard !pendingAttachments.contains(where: { $0.fileURL.standardizedFileURL == attachment.fileURL.standardizedFileURL }) else {
+            return
+        }
+        pendingAttachments.append(attachment)
+    }
+
+    private func removeAttachment(_ id: UUID) {
+        pendingAttachments.removeAll { $0.id == id }
+    }
+
+    private func attachmentKind(for url: URL, preferred: PendingChatAttachment.Kind) -> PendingChatAttachment.Kind {
+        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
+           type.conforms(to: .image) {
+            return .image
+        }
+        return preferred
+    }
+
+    private func uploadPendingAttachmentsIfNeeded(model: LLMModel) async throws -> [LLMAttachment] {
+        guard !pendingAttachments.isEmpty else { return [] }
+
+        switch model.provider {
+        case .openAI:
+            let client = OpenAIFileClient(configuration: .load())
+            var uploaded: [LLMAttachment] = []
+            for attachment in pendingAttachments {
+                let fileID = try await client.uploadFile(atPath: attachment.fileURL.path)
+                uploaded.append(
+                    LLMAttachment(
+                        fileID: fileID,
+                        kind: attachment.kind == .image ? .image : .file,
+                        fileName: attachment.fileURL.lastPathComponent
+                    )
+                )
+            }
+            return uploaded
+        case .claude, .qwen, .gemini:
+            return []
+        }
+    }
+}
+
+private struct PendingChatAttachment: Identifiable, Hashable {
+    typealias Kind = LLMAttachmentKind
+
+    let id: UUID
+    let fileURL: URL
+    let kind: Kind
+
+    init(id: UUID = UUID(), fileURL: URL, kind: Kind) {
+        self.id = id
+        self.fileURL = fileURL
+        self.kind = kind
+    }
+
+    var fileName: String {
+        fileURL.lastPathComponent
+    }
+
+    var systemImageName: String {
+        switch kind {
+        case .file:
+            return fileURL.pathExtension.lowercased() == "pdf" ? "doc.richtext.fill" : "doc.fill"
+        case .image:
+            return "photo.fill"
+        }
+    }
+}
+
+private struct PendingAttachmentChip: View {
+    let attachment: PendingChatAttachment
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button(action: onOpen) {
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(iconBackground)
+                            .frame(width: 36, height: 36)
+                        Image(systemName: attachment.systemImageName)
+                            .foregroundColor(.white)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(attachment.fileName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        Text(attachment.kind == .image ? "Photo" : fileSubtitle)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(width: 228, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(Color(NSColor.controlBackgroundColor))
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+                    .background(Color.white.opacity(0.9), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .offset(x: 6, y: -6)
+        }
+        .padding(.top, 6)
+    }
+
+    private var iconBackground: Color {
+        attachment.kind == .image ? Color.blue : Color.red
+    }
+
+    private var fileSubtitle: String {
+        let ext = attachment.fileURL.pathExtension.uppercased()
+        return ext.isEmpty ? "File" : ext
+    }
+}
+
+private struct CameraCaptureSheet: View {
+    let onComplete: (URL?) -> Void
+
+    @StateObject private var camera = CameraCaptureController()
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Group {
+                switch camera.state {
+                case .ready:
+                    CameraPreview(session: camera.session)
+                        .frame(width: 420, height: 300)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                case .requesting:
+                    ProgressView("Requesting camera access…")
+                        .frame(width: 420, height: 300)
+                case .denied:
+                    VStack(spacing: 8) {
+                        Image(systemName: "camera.slash")
+                            .font(.largeTitle)
+                            .foregroundColor(.secondary)
+                        Text("Camera access is unavailable.")
+                            .font(.headline)
+                        Text("Allow camera access in System Settings to take a photo here.")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(width: 420, height: 300)
+                case .failed(let message):
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.largeTitle)
+                            .foregroundColor(.yellow)
+                        Text(message)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(width: 420, height: 300)
+                }
+            }
+
+            HStack {
+                Button("Cancel") {
+                    onComplete(nil)
+                }
+                Spacer()
+                Button("Take Photo") {
+                    camera.capturePhoto { url in
+                        onComplete(url)
+                    }
+                }
+                .disabled(!camera.canCapture)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .onAppear {
+            camera.start()
+        }
+        .onDisappear {
+            camera.stop()
+        }
+    }
+}
+
+private final class CameraCaptureController: NSObject, ObservableObject {
+    enum State: Equatable {
+        case requesting
+        case ready
+        case denied
+        case failed(String)
+    }
+
+    @Published private(set) var state: State = .requesting
+
+    let session = AVCaptureSession()
+    private let output = AVCapturePhotoOutput()
+    private var configured = false
+    private var activeDelegates: [CameraPhotoCaptureDelegate] = []
+
+    var canCapture: Bool {
+        state == .ready
+    }
+
+    func start() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            configureAndStart()
+        case .notDetermined:
+            state = .requesting
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        self.configureAndStart()
+                    } else {
+                        self.state = .denied
+                    }
+                }
+            }
+        case .denied, .restricted:
+            state = .denied
+        @unknown default:
+            state = .failed("Camera authorization returned an unknown state.")
+        }
+    }
+
+    func stop() {
+        if session.isRunning {
+            session.stopRunning()
+        }
+    }
+
+    func capturePhoto(completion: @escaping (URL?) -> Void) {
+        guard canCapture else {
+            completion(nil)
+            return
+        }
+
+        let settings = AVCapturePhotoSettings()
+        let delegate = CameraPhotoCaptureDelegate(completion: completion)
+        activeDelegates.append(delegate)
+        delegate.onFinish = { [weak self, weak delegate] in
+            guard let self, let delegate else { return }
+            self.activeDelegates.removeAll { $0 === delegate }
+        }
+        output.capturePhoto(with: settings, delegate: delegate)
+    }
+
+    private func configureAndStart() {
+        guard !configured else {
+            state = .ready
+            if !session.isRunning {
+                session.startRunning()
+            }
+            return
+        }
+
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            state = .failed("No camera device is available.")
+            return
+        }
+
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            if session.canAddInput(input) {
+                session.addInput(input)
+            } else {
+                state = .failed("Unable to access the camera input.")
+                return
+            }
+
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+            } else {
+                state = .failed("Unable to configure photo capture.")
+                return
+            }
+        } catch {
+            state = .failed(error.localizedDescription)
+            return
+        }
+
+        configured = true
+        state = .ready
+        session.startRunning()
+    }
+}
+
+private final class CameraPhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+    private let completion: (URL?) -> Void
+    var onFinish: (() -> Void)?
+
+    init(completion: @escaping (URL?) -> Void) {
+        self.completion = completion
+    }
+
+    func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishProcessingPhoto photo: AVCapturePhoto,
+        error: Error?
+    ) {
+        guard error == nil,
+              let data = photo.fileDataRepresentation()
+        else {
+            completion(nil)
+            onFinish?()
+            return
+        }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "LLMPaperReadingHelper",
+            isDirectory: true
+        )
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent("camera-\(UUID().uuidString).jpg")
+
+        do {
+            try data.write(to: fileURL, options: [.atomic])
+            completion(fileURL)
+        } catch {
+            completion(nil)
+        }
+        onFinish?()
+    }
+}
+
+private struct CameraPreview: NSViewRepresentable {
+    let session: AVCaptureSession
+
+    func makeNSView(context: Context) -> CameraPreviewView {
+        let view = CameraPreviewView()
+        view.previewLayer.videoGravity = .resizeAspectFill
+        view.previewLayer.session = session
+        return view
+    }
+
+    func updateNSView(_ nsView: CameraPreviewView, context: Context) {
+        nsView.previewLayer.session = session
+    }
+}
+
+private final class CameraPreviewView: NSView {
+    override func makeBackingLayer() -> CALayer {
+        AVCaptureVideoPreviewLayer()
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+    }
+
+    var previewLayer: AVCaptureVideoPreviewLayer {
+        guard let layer = layer as? AVCaptureVideoPreviewLayer else {
+            fatalError("CameraPreviewView requires AVCaptureVideoPreviewLayer.")
+        }
+        return layer
     }
 }
 

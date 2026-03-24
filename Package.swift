@@ -23,7 +23,9 @@ let package = Package(
             ],
             path: "src/macos",
             linkerSettings: [
+                .linkedFramework("AVFoundation"),
                 .linkedFramework("PDFKit"),
+                .linkedFramework("QuickLook"),
                 .linkedFramework("WebKit")
             ]
         )

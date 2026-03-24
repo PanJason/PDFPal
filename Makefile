@@ -36,6 +36,8 @@ release:
 		'    <string>app_icon</string>' \
 		'    <key>NSHighResolutionCapable</key>' \
 		'    <true/>' \
+		'    <key>NSCameraUsageDescription</key>' \
+		'    <string>LLMPaperReadingHelper uses the camera to capture photos for chat attachments.</string>' \
 		'    <key>LSMinimumSystemVersion</key>' \
 		'    <string>13.0</string>' \
 		'</dict>' \
