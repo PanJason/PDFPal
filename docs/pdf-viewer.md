@@ -89,6 +89,7 @@ struct PDFKitContainer: NSViewRepresentable {}
  * - "Remove Highlight/Underline/Strikethrough" on annotation right-click
  * - "Add/Edit Note..." and "Remove Note" on annotation right-click
  * - "Ask LLM" on current text selection or clicked highlight markup
+ * - "Ask LLM" on selected text inside the native note-editor popup
  * - annotation note preview publishing for note markers, grouped markup notes,
  *   and note entries selected from the highlights sidebar
  * - citation-link interception for individually clickable PDF link annotations
@@ -153,6 +154,8 @@ struct PDFEmptyState: View {}
 - `Ask LLM` prefers the live text selection when one exists. If there is no
   active selection, it falls back to the clicked highlight/underline/strike
   annotation and extracts the marked text as chat context.
+- When the native PDFKit note popup editor is open, its `NSTextView` context
+  menu also exposes `Ask LLM` for the currently selected note text.
 
 ## Thumbnail Sidebar Behavior
 - `Thumbnails` mode is implemented with `PDFThumbnailView`, which is sensitive to
@@ -249,6 +252,10 @@ struct PDFEmptyState: View {}
   when there is no active text selection. For grouped or multi-line highlights,
   the viewer extracts the actual marked text, including quadrilateral-point
   based line segments, and uses that text as the chat seed context.
+- While the note popup editor is active, the observed editor `NSTextView` is
+  augmented with an `Ask LLM` menu item. The action is enabled only when the
+  user has selected note text inside that popup, and it sends the selected note
+  substring through the same chat-seeding callback as the PDF-view action.
 
 ## Citation Link Behavior
 - Citation handling only activates for PDF link annotations whose visible label
