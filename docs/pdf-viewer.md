@@ -264,6 +264,9 @@ struct PDFEmptyState: View {}
 - Adjacent link fragments that share the same destination are clustered before
   label extraction so split author/year links like `Luo et al., 2025` behave as
   a single clickable citation.
+- Wrapped citation links can also span a line break. If the next-line fragment
+  looks like a continuation (`et al.`, punctuation, or the year token), the
+  viewer merges both link fragments into one citation label.
 - Suffix-only fragments can inherit author/year context from surrounding text so
   labels like `Du et al., 2025b,a` can resolve `2025b` and `2025a` separately.
 - Internal `PDFActionGoTo` and destination-backed link annotations are captured
