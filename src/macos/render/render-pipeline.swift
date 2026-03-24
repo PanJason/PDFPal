@@ -175,14 +175,20 @@ private enum MarkdownListType {
     case ordered
 }
 
+private struct MarkdownListItem {
+    let html: String
+    let ordinal: Int?
+}
+
 private enum SimpleMarkdownRenderer {
     static func render(_ markdown: String) -> String {
         let lines = markdown.components(separatedBy: "\n")
         var htmlBlocks: [String] = []
         var paragraphLines: [String] = []
         var blockquoteLines: [String] = []
-        var listItems: [String] = []
+        var listItems: [MarkdownListItem] = []
         var activeListType: MarkdownListType?
+        var orderedListStart: Int?
         var activeFence: String?
         var fencedCodeLines: [String] = []
         var fencedCodeLanguage = ""
@@ -208,14 +214,21 @@ private enum SimpleMarkdownRenderer {
         func flushList() {
             guard !listItems.isEmpty, let activeListType else { return }
             let tag = activeListType == .ordered ? "ol" : "ul"
-            let items = listItems.map { "<li>\($0)</li>" }.joined()
-            htmlBlocks.append("<\(tag)>\(items)</\(tag)>")
+            let attributes: String
+            if activeListType == .ordered, let orderedListStart, orderedListStart != 1 {
+                attributes = " start=\"\(orderedListStart)\""
+            } else {
+                attributes = ""
+            }
+            let items = listItems.map { "<li>\($0.html)</li>" }.joined()
+            htmlBlocks.append("<\(tag)\(attributes)>\(items)</\(tag)>")
             listItems.removeAll()
             selfResetList()
         }
 
         func selfResetList() {
             activeListType = nil
+            orderedListStart = nil
         }
 
         func flushCodeBlock() {
@@ -280,7 +293,15 @@ private enum SimpleMarkdownRenderer {
                     flushList()
                 }
                 activeListType = listItem.type
-                listItems.append(renderInline(listItem.content))
+                if listItem.type == .ordered, orderedListStart == nil {
+                    orderedListStart = listItem.ordinal
+                }
+                listItems.append(
+                    MarkdownListItem(
+                        html: renderInline(listItem.content),
+                        ordinal: listItem.ordinal
+                    )
+                )
                 continue
             }
 
@@ -397,24 +418,23 @@ private enum SimpleMarkdownRenderer {
         return String(trimmed.dropFirst().trimmingCharacters(in: .whitespaces))
     }
 
-    private static func listItemInfo(in line: String) -> (type: MarkdownListType, content: String)? {
+    private static func listItemInfo(in line: String) -> (type: MarkdownListType, content: String, ordinal: Int?)? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
-            return (.unordered, String(trimmed.dropFirst(2)))
+            return (.unordered, String(trimmed.dropFirst(2)), nil)
         }
 
-        let pattern = #"^(\d+)[\.\)]\s+(.+)$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return nil
+        let separatorIndex = trimmed.firstIndex(where: { $0 == "." || $0 == ")" })
+        if let separatorIndex {
+            let ordinalPart = trimmed[..<separatorIndex]
+            let remainderStart = trimmed.index(after: separatorIndex)
+            let remainder = trimmed[remainderStart...].trimmingCharacters(in: .whitespaces)
+            if let ordinal = Int(ordinalPart), !remainder.isEmpty {
+                return (.ordered, remainder, ordinal)
+            }
         }
-        let nsLine = trimmed as NSString
-        let range = NSRange(location: 0, length: nsLine.length)
-        guard let match = regex.firstMatch(in: trimmed, options: [], range: range),
-              match.numberOfRanges > 2
-        else {
-            return nil
-        }
-        return (.ordered, nsLine.substring(with: match.range(at: 2)))
+
+        return nil
     }
 }
 
