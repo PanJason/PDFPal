@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 struct QwenClientConfiguration {
     var endpoint: URL
@@ -29,9 +30,9 @@ struct QwenClientConfiguration {
     }
 }
 
-// Qwen uses the OpenAI-compatible Chat Completions API.  File uploads are not
-// supported; LLMRequest.fileID is ignored.  Use NoopFileAttachmentClient for
-// Qwen sessions.
+// Qwen uses the DashScope OpenAI-compatible Chat Completions API.
+// Rich composer support is currently limited to image-style inputs encoded as
+// image_url content parts. Generic file attachments remain unsupported here.
 struct QwenStreamingClient: LLMClient {
     let configuration: QwenClientConfiguration
     let apiKeyProvider: any APIKeyProvider
@@ -167,14 +168,15 @@ struct QwenStreamingClient: LLMClient {
         var messages: [QwenMessage] = []
 
         if let systemContent = buildSystemContent(for: request) {
-            messages.append(QwenMessage(role: "system", content: systemContent))
+            messages.append(QwenMessage(role: "system", content: .text(systemContent)))
         }
-        messages.append(QwenMessage(role: "user", content: request.userPrompt))
+        messages.append(QwenMessage(role: "user", content: buildUserContent(for: request)))
 
         let payload = QwenRequestBody(
             model: configuration.model,
             messages: messages,
-            stream: true
+            stream: true,
+            enableSearch: request.webSearchEnabled
         )
 
         let encoder = JSONEncoder()
@@ -202,6 +204,37 @@ struct QwenStreamingClient: LLMClient {
         \(context)
         \"\"\"
         """
+    }
+
+    private func buildUserContent(for request: LLMRequest) -> QwenMessageContent {
+        var parts: [QwenContentPart] = []
+
+        for attachment in request.attachments where attachment.kind == .image {
+            if let imageURL = makeQwenImageURL(from: attachment.fileID) {
+                parts.append(.imageURL(imageURL))
+            }
+        }
+
+        parts.append(.text(request.userPrompt))
+        return .parts(parts)
+    }
+
+    private func makeQwenImageURL(from fileID: String) -> String? {
+        let trimmed = fileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let fileURL = URL(fileURLWithPath: trimmed)
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        let mimeType = mimeType(for: fileURL)
+        return "data:\(mimeType);base64,\(data.base64EncodedString())"
+    }
+
+    private func mimeType(for fileURL: URL) -> String {
+        if let type = UTType(filenameExtension: fileURL.pathExtension),
+           let mimeType = type.preferredMIMEType {
+            return mimeType
+        }
+        return "application/octet-stream"
     }
 
     private func readAllBytes(from bytes: URLSession.AsyncBytes) async throws -> Data {
@@ -236,11 +269,58 @@ private struct QwenRequestBody: Encodable {
     let model: String
     let messages: [QwenMessage]
     let stream: Bool
+    let enableSearch: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case model
+        case messages
+        case stream
+        case enableSearch = "enable_search"
+    }
 }
 
 private struct QwenMessage: Encodable {
     let role: String
-    let content: String
+    let content: QwenMessageContent
+}
+
+private enum QwenMessageContent: Encodable {
+    case text(String)
+    case parts([QwenContentPart])
+
+    func encode(to encoder: Encoder) throws {
+        var singleValue = encoder.singleValueContainer()
+        switch self {
+        case .text(let text):
+            try singleValue.encode(text)
+        case .parts(let parts):
+            try singleValue.encode(parts)
+        }
+    }
+}
+
+private struct QwenContentPart: Encodable {
+    let type: String
+    let text: String?
+    let imageURL: QwenImageURL?
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case imageURL = "image_url"
+    }
+
+    static func text(_ text: String) -> QwenContentPart {
+        QwenContentPart(type: "text", text: text, imageURL: nil)
+    }
+
+    static func imageURL(_ url: String) -> QwenContentPart {
+        QwenContentPart(type: "image_url", text: nil, imageURL: QwenImageURL(url: url))
+    }
+}
+
+private struct QwenImageURL: Encodable {
+    let url: String
 }
 
 private struct QwenStreamChunk: Decodable {

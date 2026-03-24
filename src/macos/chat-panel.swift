@@ -438,11 +438,21 @@ struct ChatPanel: View {
     }
 
     private var supportsRichInput: Bool {
-        selectedModel.provider == .openAI
+        switch selectedModel.provider {
+        case .openAI, .qwen:
+            return true
+        case .claude, .gemini:
+            return false
+        }
     }
 
     private var supportsWebSearch: Bool {
-        selectedModel.provider == .openAI
+        switch selectedModel.provider {
+        case .openAI, .qwen:
+            return true
+        case .claude, .gemini:
+            return false
+        }
     }
 
     private var contextText: String {
@@ -489,11 +499,16 @@ struct ChatPanel: View {
 
         guard ensureAPIKeyAvailable(for: selectedModel) else { return false }
         if !supportsRichInput, !pendingAttachments.isEmpty {
-            errorMessage = "Attachments are only implemented for OpenAI models right now."
+            errorMessage = "Attachments are not implemented for this provider yet."
             return false
         }
         if !supportsWebSearch, isWebSearchEnabled {
-            errorMessage = "Web search is only implemented for OpenAI models right now."
+            errorMessage = "Web search is not implemented for this provider yet."
+            return false
+        }
+        if selectedModel.provider == .qwen,
+           pendingAttachments.contains(where: { $0.kind == .file }) {
+            errorMessage = "Qwen rich input currently supports images and screenshots, but not file attachments."
             return false
         }
         return true
@@ -957,7 +972,15 @@ struct ChatPanel: View {
                 )
             }
             return uploaded
-        case .claude, .qwen, .gemini:
+        case .qwen:
+            return pendingAttachments.map {
+                LLMAttachment(
+                    fileID: $0.fileURL.path,
+                    kind: $0.kind == .image ? .image : .file,
+                    fileName: $0.fileURL.lastPathComponent
+                )
+            }
+        case .claude, .gemini:
             return []
         }
     }
