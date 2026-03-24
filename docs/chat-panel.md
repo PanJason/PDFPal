@@ -7,9 +7,10 @@ and UI states for loading and errors with retry. It includes a model picker,
 API key prompt, per-provider session selection sidebar (OpenAI, Claude,
 Gemini, Qwen), and streaming updates from the LLM service. A hover-only fold control
 lets the user hide or show the session sidebar. The composer now also supports
-OpenAI-only rich input actions that mirror the desktop ChatGPT app: attachment
-insertion from a `+` menu, removable attachment chips with Quick Look, and a
-web-search toggle rendered as a pill when enabled.
+ChatGPT-style rich input actions from a `+` menu, removable attachment chips
+with Quick Look, and a web-search toggle rendered as a pill when enabled. The
+provider support is staged: OpenAI supports files, images, camera capture, and
+web search; Qwen supports image-style attachments and web search.
 
 ## Public API
 ```swift
@@ -26,8 +27,8 @@ web-search toggle rendered as a pill when enabled.
  * and input composer. Streams responses from the LLM service and prompts
  * for an API key when needed. Displays a session sidebar for switching
  * between sessions within the current model family. The sidebar can be
- * collapsed with a hover-only fold control. For OpenAI models, the composer
- * supports file uploads, image uploads, screenshots, camera capture, and
+ * collapsed with a hover-only fold control. For supported providers, the
+ * composer supports file or image uploads, screenshots, camera capture, and
  * web-search-enabled requests.
  *
  * Example:
@@ -107,9 +108,9 @@ struct LLMModel: Identifiable {}
 - The composer tracks pending attachments separately from the saved session.
   Attachments are shown as removable chips above the input box and are cleared
   after a successful send or when the active session changes.
-- The web search control is transient UI state. When enabled for OpenAI models,
-  the globe expands into a rounded search pill and the outgoing request opts
-  into provider-side web search.
+- The web search control is transient UI state. When enabled for providers that
+  support it, the globe expands into a rounded search pill and the outgoing
+  request opts into provider-side web search.
 - Assistant messages align to the left, while user messages align to the right.
 - User messages that include context show a context icon on the bubble. Tapping
   the icon reveals the stored context beneath the message.
@@ -137,12 +138,17 @@ struct LLMModel: Identifiable {}
   sent as `LLMAttachment` entries on the request.
 - The OpenAI composer also exposes a web-search toggle. When enabled, the
   request includes the provider's web-search preview tool.
+- For Qwen models, the composer accepts image attachments, screenshots, and
+  camera photos. These are encoded as `image_url` content parts for the
+  DashScope-compatible chat completions API.
+- Qwen web search is enabled through the provider's `enable_search` request
+  parameter.
 - Deleting an OpenAI, Claude, or Gemini session also attempts to delete its
   uploaded file from the provider Files API.
-- Qwen sessions do not upload files; `LLMRequest.fileID` is always nil for Qwen.
-- The rich composer controls are currently implemented for OpenAI only. Other
-  providers keep the same base chat UI but do not enable attachment upload or
-  web search yet.
+- Qwen sessions do not upload generic files; the current rich composer support
+  there is limited to image-style attachments.
+- Claude remains unchanged, and Gemini has not been wired into the rich
+  composer controls yet.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples
