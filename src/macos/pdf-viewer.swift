@@ -1395,8 +1395,13 @@ final class PDFKitView: PDFView {
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
         let selectionText = currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        lastSelectionText = selectionText
         contextMenuAnnotation = annotation(at: event)
+        let askContextText = askLLMContextText(
+            selectionText: selectionText,
+            annotation: contextMenuAnnotation,
+            fallbackPage: contextMenuPage
+        )
+        lastSelectionText = askContextText
         publishAnnotationSelection(for: contextMenuAnnotation, fallbackPage: contextMenuPage)
 
         menu.items.removeAll { $0.tag == 9100 }
@@ -1409,7 +1414,7 @@ final class PDFKitView: PDFView {
 
         let askItem = NSMenuItem(title: "Ask LLM", action: #selector(handleAskLLM), keyEquivalent: "")
         askItem.target = self
-        askItem.isEnabled = !selectionText.isEmpty
+        askItem.isEnabled = !askContextText.isEmpty
         askItem.tag = 9100
         menu.addItem(askItem)
 
@@ -1729,7 +1734,11 @@ final class PDFKitView: PDFView {
 
     @objc private func handleAskLLM() {
         let selection = lastSelectionText.isEmpty
-            ? currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            ? askLLMContextText(
+                selectionText: currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+                annotation: contextMenuAnnotation,
+                fallbackPage: contextMenuPage
+            )
             : lastSelectionText
         guard !selection.isEmpty else {
             return
@@ -2096,6 +2105,89 @@ final class PDFKitView: PDFView {
             cluster: resolvedCluster,
             noteText: noteText(forMarkupCluster: resolvedCluster, on: page)
         )
+    }
+
+    private func askLLMContextText(
+        selectionText: String,
+        annotation: PDFAnnotation?,
+        fallbackPage: PDFPage?
+    ) -> String {
+        let trimmedSelection = selectionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSelection.isEmpty {
+            return trimmedSelection
+        }
+
+        let genericPlaceholders: Set<String> = [
+            "Highlighted text",
+            "Underlined text",
+            "Struck through text",
+            "Note"
+        ]
+
+        if let annotation {
+            if isRemovableMarkup(annotation),
+               let page = annotation.page ?? fallbackPage {
+                let cluster = markupCluster(for: annotation, on: page)
+                let resolvedCluster = cluster.isEmpty ? [annotation] : cluster
+                let excerpt = markupExcerptForAskLLM(for: resolvedCluster, on: page)
+                return genericPlaceholders.contains(excerpt) ? "" : excerpt
+            }
+
+            if let parent = annotation.value(forAnnotationKey: .parent) as? PDFAnnotation,
+               isRemovableMarkup(parent),
+               let page = parent.page ?? fallbackPage {
+                let cluster = markupCluster(for: parent, on: page)
+                let resolvedCluster = cluster.isEmpty ? [parent] : cluster
+                let excerpt = markupExcerptForAskLLM(for: resolvedCluster, on: page)
+                return genericPlaceholders.contains(excerpt) ? "" : excerpt
+            }
+        }
+
+        return ""
+    }
+
+    private func markupExcerptForAskLLM(for annotations: [PDFAnnotation], on page: PDFPage) -> String {
+        let fragments = annotations.compactMap { annotation -> String? in
+            if let quadValues = annotation.quadrilateralPoints,
+               quadValues.count >= 8, quadValues.count % 4 == 0 {
+                let ox = annotation.bounds.minX
+                let oy = annotation.bounds.minY
+                let pts = quadValues.map { $0.pointValue }
+                let lineTexts = stride(from: 0, to: pts.count, by: 4).compactMap { i -> String? in
+                    let minX = min(pts[i].x, pts[i + 2].x) + ox
+                    let maxX = max(pts[i + 1].x, pts[i + 3].x) + ox
+                    let minY = min(pts[i + 2].y, pts[i + 3].y) + oy
+                    let maxY = max(pts[i].y, pts[i + 1].y) + oy
+                    let rect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+                    return page.selection(for: rect)?
+                        .string?
+                        .replacingOccurrences(of: "\n", with: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }.filter { !$0.isEmpty }
+                return lineTexts.isEmpty ? nil : lineTexts.joined(separator: " ")
+            }
+
+            return page.selection(for: annotation.bounds)?
+                .string?
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+
+        if !fragments.isEmpty {
+            return fragments.joined(separator: " ")
+        }
+
+        let typeName = (annotations.first?.type ?? "").lowercased()
+        if typeName.contains("highlight") {
+            return "Highlighted text"
+        }
+        if typeName.contains("underline") {
+            return "Underlined text"
+        }
+        if typeName.contains("strike") {
+            return "Struck through text"
+        }
+        return "Note"
     }
 
     private func toggleOverlayMarkup(_ subtype: PDFAnnotationSubtype) {
