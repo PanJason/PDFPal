@@ -188,12 +188,16 @@ struct PDFEmptyState: View {}
   local text-note marker during normalization.
 - This avoids writing a standalone text-note annotation for app-authored notes,
   which Preview would otherwise treat as a second unattached note.
-- On save, synthetic note markers and transient popup remnants are removed from
-  the written PDF. The single persisted source of truth is the anchor
-  highlight/underline/strike annotation's `contents`.
+- During an active note-editing session, the viewer keeps PDFKit's native note
+  popup/icon state alive and does not immediately rebuild the app-owned marker.
+  This avoids showing both the native PDFKit icon and the app marker for a
+  brand-new note before normalization.
+- On explicit save or popup close, the viewer now commits note text without
+  immediately normalizing marker state. This keeps the live PDFKit note model
+  stable while the user is still working in the current session.
 - On load, if a markup annotation already carries note text in `contents`, the
-  viewer recreates one local note marker so in-app note affordances remain
-  visible.
+  viewer normalizes the note state and recreates one local note marker so
+  in-app note affordances remain visible.
 - Preview-authored notes are also adopted into this model. If a native Preview
   popup is attached to a markup annotation, the viewer copies that note text
   onto the markup annotation, clears the native popup linkage, and keeps only
@@ -223,8 +227,10 @@ struct PDFEmptyState: View {}
   panel on the first open instead of only after closing and reopening the note.
 - Click-away and `Esc` dismissal both route through the same popup-close path.
   The viewer commits the latest live text, asks PDFKit to close the popup, then
-  runs note normalization and any deferred save work after the real popup close
-  event.
+  runs any deferred save work after the real popup close event.
+- For brand-new notes, the viewer keeps PDFKit's native note icon as the only
+  visible icon until a later normalization pass. The app-owned marker is not
+  created during the live popup session.
 - For grouped multi-line highlights, note presence is resolved at the highlight
   cluster level. If any line in the group has a note, right-clicking any line in
   that group exposes `Remove Note` rather than `Add Note`.
