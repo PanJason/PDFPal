@@ -439,18 +439,18 @@ struct ChatPanel: View {
 
     private var supportsRichInput: Bool {
         switch selectedModel.provider {
-        case .openAI, .qwen:
+        case .openAI, .qwen, .gemini:
             return true
-        case .claude, .gemini:
+        case .claude:
             return false
         }
     }
 
     private var supportsWebSearch: Bool {
         switch selectedModel.provider {
-        case .openAI, .qwen:
+        case .openAI, .qwen, .gemini:
             return true
-        case .claude, .gemini:
+        case .claude:
             return false
         }
     }
@@ -980,7 +980,21 @@ struct ChatPanel: View {
                     fileName: $0.fileURL.lastPathComponent
                 )
             }
-        case .claude, .gemini:
+        case .gemini:
+            let client = GeminiFileClient(configuration: .load())
+            var uploaded: [LLMAttachment] = []
+            for attachment in pendingAttachments {
+                let fileID = try await client.uploadFile(atPath: attachment.fileURL.path)
+                uploaded.append(
+                    LLMAttachment(
+                        fileID: fileID,
+                        kind: attachment.kind == .image ? .image : .file,
+                        fileName: attachment.fileURL.lastPathComponent
+                    )
+                )
+            }
+            return uploaded
+        case .claude:
             return []
         }
     }

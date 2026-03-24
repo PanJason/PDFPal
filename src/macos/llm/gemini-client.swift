@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 struct GeminiClientConfiguration {
     var endpoint: URL
@@ -201,9 +202,17 @@ struct GeminiStreamingClient: LLMClient {
             : nil
         let payload = GeminiRequestBody(
             contents: [
-                GeminiContent(role: "user", parts: buildParts(prompt: prompt, fileURI: request.fileID))
+                GeminiContent(
+                    role: "user",
+                    parts: buildParts(
+                        prompt: prompt,
+                        documentFileURI: request.fileID,
+                        attachments: request.attachments
+                    )
+                )
             ],
-            generationConfig: generationConfig
+            generationConfig: generationConfig,
+            tools: request.webSearchEnabled ? [.googleSearch] : nil
         )
 
         let data = try JSONEncoder().encode(payload)
@@ -242,17 +251,34 @@ struct GeminiStreamingClient: LLMClient {
         """
     }
 
-    private func buildParts(prompt: String, fileURI: String?) -> [GeminiPart] {
-        var parts: [GeminiPart] = [
-            .text(prompt)
-        ]
+    private func buildParts(
+        prompt: String,
+        documentFileURI: String?,
+        attachments: [LLMAttachment]
+    ) -> [GeminiPart] {
+        var parts: [GeminiPart] = []
 
-        if let fileURI = fileURI?.trimmingCharacters(in: .whitespacesAndNewlines),
+        if let fileURI = documentFileURI?.trimmingCharacters(in: .whitespacesAndNewlines),
            !fileURI.isEmpty {
             parts.append(.fileData(mimeType: "application/pdf", fileURI: fileURI))
         }
 
+        for attachment in attachments {
+            let fileURI = attachment.fileID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fileURI.isEmpty else { continue }
+            parts.append(.fileData(mimeType: mimeType(for: attachment), fileURI: fileURI))
+        }
+
+        parts.append(.text(prompt))
         return parts
+    }
+
+    private func mimeType(for attachment: LLMAttachment) -> String {
+        if let type = UTType(filenameExtension: URL(fileURLWithPath: attachment.fileName).pathExtension),
+           let mimeType = type.preferredMIMEType {
+            return mimeType
+        }
+        return attachment.kind == .image ? "image/jpeg" : "application/octet-stream"
     }
 
     private func readAllBytes(from bytes: URLSession.AsyncBytes) async throws -> Data {
@@ -286,6 +312,13 @@ struct GeminiStreamingClient: LLMClient {
 private struct GeminiRequestBody: Encodable {
     let contents: [GeminiContent]
     let generationConfig: GeminiGenerationConfig?
+    let tools: [GeminiTool]?
+
+    private enum CodingKeys: String, CodingKey {
+        case contents
+        case generationConfig = "generationConfig"
+        case tools
+    }
 }
 
 private struct GeminiContent: Encodable {
@@ -313,6 +346,18 @@ private struct GeminiPart: Encodable {
         )
     }
 }
+
+private struct GeminiTool: Encodable {
+    let googleSearch: GeminiGoogleSearch?
+
+    private enum CodingKeys: String, CodingKey {
+        case googleSearch = "google_search"
+    }
+
+    static let googleSearch = GeminiTool(googleSearch: GeminiGoogleSearch())
+}
+
+private struct GeminiGoogleSearch: Encodable {}
 
 private struct GeminiFileDataPart: Encodable {
     let mimeType: String
@@ -384,15 +429,17 @@ struct GeminiFileClient {
     func uploadFile(atPath path: String) async throws -> String {
         let fileURL = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw LLMClientError.invalidRequest("PDF file not found at \(path).")
+            throw LLMClientError.invalidRequest("File not found at \(path).")
         }
 
         let apiKey = try apiKeyProvider.loadAPIKey()
         let fileData = try Data(contentsOf: fileURL)
+        let mimeType = mimeType(for: fileURL)
         let uploadURL = try await startResumableUpload(
             apiKey: apiKey,
             fileName: fileURL.lastPathComponent,
-            fileSizeBytes: fileData.count
+            fileSizeBytes: fileData.count,
+            mimeType: mimeType
         )
 
         let uploadedFile = try await finalizeUpload(
@@ -437,7 +484,8 @@ struct GeminiFileClient {
     private func startResumableUpload(
         apiKey: String,
         fileName: String,
-        fileSizeBytes: Int
+        fileSizeBytes: Int,
+        mimeType: String
     ) async throws -> URL {
         let endpoint = try uploadStartEndpoint(apiKey: apiKey)
         var request = URLRequest(url: endpoint)
@@ -449,7 +497,7 @@ struct GeminiFileClient {
         request.setValue("resumable", forHTTPHeaderField: "X-Goog-Upload-Protocol")
         request.setValue("start", forHTTPHeaderField: "X-Goog-Upload-Command")
         request.setValue(String(fileSizeBytes), forHTTPHeaderField: "X-Goog-Upload-Header-Content-Length")
-        request.setValue("application/pdf", forHTTPHeaderField: "X-Goog-Upload-Header-Content-Type")
+        request.setValue(mimeType, forHTTPHeaderField: "X-Goog-Upload-Header-Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let (_, response) = try await session.data(for: request)
@@ -585,6 +633,14 @@ struct GeminiFileClient {
             return parsed.error?.message
         }
         return String(data: data, encoding: .utf8)
+    }
+
+    private func mimeType(for fileURL: URL) -> String {
+        if let type = UTType(filenameExtension: fileURL.pathExtension),
+           let mimeType = type.preferredMIMEType {
+            return mimeType
+        }
+        return "application/octet-stream"
     }
 
     private func resourceName(fromURI uri: String?) -> String? {
