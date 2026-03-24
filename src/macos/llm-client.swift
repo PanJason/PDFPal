@@ -1,11 +1,24 @@
 import Foundation
 import Security
 
+enum LLMAttachmentKind: String, Codable, Hashable {
+    case file
+    case image
+}
+
+struct LLMAttachment: Codable, Hashable {
+    let fileID: String
+    let kind: LLMAttachmentKind
+    let fileName: String
+}
+
 struct LLMRequest {
     let documentId: String
     let userPrompt: String
     let context: String?
     let fileID: String?
+    let attachments: [LLMAttachment]
+    let webSearchEnabled: Bool
 }
 
 struct LLMResponse {
@@ -219,6 +232,8 @@ struct MockLLMClient: LLMClient {
                 Mock response for: \(request.userPrompt)
                 Context length: \(request.context?.count ?? 0)
                 File id attached: \(request.fileID ?? "none")
+                Attachments: \(request.attachments.map(\.fileName).joined(separator: ", "))
+                Web search: \(request.webSearchEnabled ? "enabled" : "disabled")
                 """
 
                 do {

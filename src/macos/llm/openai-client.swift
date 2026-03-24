@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 struct OpenAIClientConfiguration {
     var endpoint: URL
@@ -181,7 +182,8 @@ struct OpenAIStreamingClient: LLMClient {
             input: buildInput(for: request),
             instructions: instructions,
             stream: stream,
-            metadata: request.documentId.isEmpty ? nil : ["document_id": request.documentId]
+            metadata: request.documentId.isEmpty ? nil : ["document_id": request.documentId],
+            tools: request.webSearchEnabled ? [.webSearchPreview] : nil
         )
         let encoder = JSONEncoder()
         let data = try encoder.encode(payload)
@@ -223,6 +225,17 @@ struct OpenAIStreamingClient: LLMClient {
             content.append(.inputFile(fileID))
         }
 
+        for attachment in request.attachments {
+            let fileID = attachment.fileID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fileID.isEmpty else { continue }
+            switch attachment.kind {
+            case .file:
+                content.append(.inputFile(fileID))
+            case .image:
+                content.append(.inputImage(fileID))
+            }
+        }
+
         content.append(.inputText(request.userPrompt))
 
         return [OpenAIInputMessage(role: "user", content: content)]
@@ -262,6 +275,7 @@ private struct OpenAIRequestBody: Encodable {
     let instructions: String?
     let stream: Bool
     let metadata: [String: String]?
+    let tools: [OpenAITool]?
 }
 
 private struct OpenAIInputMessage: Encodable {
@@ -273,20 +287,32 @@ private struct OpenAIInputContent: Encodable {
     let type: String
     let text: String?
     let fileID: String?
+    let detail: String?
 
     private enum CodingKeys: String, CodingKey {
         case type
         case text
         case fileID = "file_id"
+        case detail
     }
 
     static func inputText(_ text: String) -> OpenAIInputContent {
-        OpenAIInputContent(type: "input_text", text: text, fileID: nil)
+        OpenAIInputContent(type: "input_text", text: text, fileID: nil, detail: nil)
     }
 
     static func inputFile(_ fileID: String) -> OpenAIInputContent {
-        OpenAIInputContent(type: "input_file", text: nil, fileID: fileID)
+        OpenAIInputContent(type: "input_file", text: nil, fileID: fileID, detail: nil)
     }
+
+    static func inputImage(_ fileID: String, detail: String = "auto") -> OpenAIInputContent {
+        OpenAIInputContent(type: "input_image", text: nil, fileID: fileID, detail: detail)
+    }
+}
+
+private struct OpenAITool: Encodable {
+    let type: String
+
+    static let webSearchPreview = OpenAITool(type: "web_search_preview")
 }
 
 private struct OpenAIErrorResponse: Decodable {
@@ -356,14 +382,20 @@ struct OpenAIFileClient {
     func uploadFile(atPath path: String) async throws -> String {
         let fileURL = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw LLMClientError.invalidRequest("PDF file not found at \(path).")
+            throw LLMClientError.invalidRequest("File not found at \(path).")
         }
 
         let fileData = try Data(contentsOf: fileURL)
         let apiKey = try apiKeyProvider.loadAPIKey()
         let endpoint = try filesEndpoint()
         let boundary = "Boundary-\(UUID().uuidString)"
-        let body = makeMultipartBody(fileData: fileData, fileName: fileURL.lastPathComponent, boundary: boundary)
+        let mimeType = mimeType(for: fileURL)
+        let body = makeMultipartBody(
+            fileData: fileData,
+            fileName: fileURL.lastPathComponent,
+            mimeType: mimeType,
+            boundary: boundary
+        )
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -429,7 +461,7 @@ struct OpenAIFileClient {
         return url
     }
 
-    private func makeMultipartBody(fileData: Data, fileName: String, boundary: String) -> Data {
+    private func makeMultipartBody(fileData: Data, fileName: String, mimeType: String, boundary: String) -> Data {
         var body = Data()
 
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
@@ -438,7 +470,7 @@ struct OpenAIFileClient {
 
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: application/pdf\r\n\r\n".data(using: .utf8)!)
+        body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
         body.append(fileData)
         body.append("\r\n".data(using: .utf8)!)
 
@@ -452,6 +484,14 @@ struct OpenAIFileClient {
             return parsed.error?.message
         }
         return String(data: data, encoding: .utf8)
+    }
+
+    private func mimeType(for fileURL: URL) -> String {
+        if let type = UTType(filenameExtension: fileURL.pathExtension),
+           let mimeType = type.preferredMIMEType {
+            return mimeType
+        }
+        return "application/octet-stream"
     }
 }
 
