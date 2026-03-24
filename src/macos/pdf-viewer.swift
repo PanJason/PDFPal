@@ -1090,6 +1090,7 @@ final class PDFKitView: PDFView {
     private var noteEditorTextEndObserver: NSObjectProtocol?
     private var pendingSaveAfterNoteEditorCloses = false
     private let noteEditorNormalizationFollowUpDelay: TimeInterval = 0.04
+    private let noteEditorCloseFallbackDelay: TimeInterval = 0.08
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -3209,6 +3210,24 @@ final class PDFKitView: PDFView {
         return uniqueAnnotations(popups).filter { ($0.type ?? "").lowercased().contains("popup") }
     }
 
+    private func hasOpenActiveNotePopup() -> Bool {
+        activePopupAnnotationsForObservedNote().contains { $0.isOpen }
+    }
+
+    private func scheduleObservedNoteEditorCloseFallback() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + noteEditorCloseFallbackDelay) { [weak self] in
+            guard let self,
+                  self.observedNoteEditorWindow != nil || self.observedNoteEditorTextView != nil
+            else {
+                return
+            }
+
+            if !self.hasOpenActiveNotePopup() {
+                self.handleObservedNoteEditorWindowClosed()
+            }
+        }
+    }
+
     @discardableResult
     private func closeActiveNotePopupIfNeeded() -> Bool {
         let popups = activePopupAnnotationsForObservedNote()
@@ -3221,6 +3240,8 @@ final class PDFKitView: PDFView {
         if let page = activeMarkupClusterForObservedNote()?.page ?? activeAnnotation?.page ?? activeFallbackPage {
             refreshAnnotationRendering(on: page)
         }
+
+        scheduleObservedNoteEditorCloseFallback()
 
         return true
     }
