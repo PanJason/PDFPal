@@ -54,8 +54,9 @@ enum PDFSidebarMode {}
  * @sidebarMode: Current selected left sidebar mode
  *
  * Displays a PDF with auto-scaling, shows empty/error states, routes the
- * current selection to the app shell when Ask LLM is chosen, and reports the
- * currently selected/opened annotation note for rendering. Citation link clicks
+ * current text selection or clicked highlight text to the app shell when Ask
+ * LLM is chosen, and reports the currently selected/opened annotation note for
+ * rendering. Citation link clicks
  * are intercepted before PDFKit navigates them so the app can show a citation
  * card while still preserving exact "See in references" behavior.
  *
@@ -76,7 +77,8 @@ struct PDFKitContainer: NSViewRepresentable {}
 
 /**
  * PDFKitView - PDFView subclass that augments the context menu
- * @onAskLLM: Closure called with the current selection text
+ * @onAskLLM: Closure called with the current selection text or clicked
+ * highlight excerpt
  * @onAnnotationSelectionChanged: Closure called with the resolved note-bearing
  * annotation selection to preview
  * @onCitationSelectionChanged: Closure called with the resolved citation-link
@@ -86,7 +88,7 @@ struct PDFKitContainer: NSViewRepresentable {}
  * - "Annotate Selection" submenu (highlight colors, underline, strikethrough)
  * - "Remove Highlight/Underline/Strikethrough" on annotation right-click
  * - "Add/Edit Note..." and "Remove Note" on annotation right-click
- * - "Ask LLM" on current text selection
+ * - "Ask LLM" on current text selection or clicked highlight markup
  * - annotation note preview publishing for note markers, grouped markup notes,
  *   and note entries selected from the highlights sidebar
  * - citation-link interception for individually clickable PDF link annotations
@@ -106,8 +108,8 @@ struct PDFEmptyState: View {}
 ## State Management
 - `PDFViewer` owns `@State` properties for the loaded `PDFDocument` and a
   user-facing load error message.
-- `PDFKitView` maintains the Ask LLM callback and caches the latest selection
-  when building the context menu.
+- `PDFKitView` maintains the Ask LLM callback and caches the latest Ask LLM
+  context text when building the context menu.
 - `PDFKitView` listens for toolbar annotation commands via
   `Notification.Name.pdfApplyAnnotation`.
 - `PDFKitView` listens for `Notification.Name.pdfSaveDocument` and writes the
@@ -148,6 +150,9 @@ struct PDFEmptyState: View {}
 - `Notification.Name.pdfGoToCitationDestination` is consumed by `PDFKitView` to
   jump back to the exact reference destination captured from the original
   citation link click.
+- `Ask LLM` prefers the live text selection when one exists. If there is no
+  active selection, it falls back to the clicked highlight/underline/strike
+  annotation and extracts the marked text as chat context.
 
 ## Thumbnail Sidebar Behavior
 - `Thumbnails` mode is implemented with `PDFThumbnailView`, which is sensitive to
@@ -240,6 +245,10 @@ struct PDFEmptyState: View {}
 - Clicking directly on a note marker or markup annotation in the PDF view
   publishes the corresponding note text to the preview panel when note content
   exists.
+- The `Ask LLM` context menu action is available on existing highlights even
+  when there is no active text selection. For grouped or multi-line highlights,
+  the viewer extracts the actual marked text, including quadrilateral-point
+  based line segments, and uses that text as the chat seed context.
 
 ## Citation Link Behavior
 - Citation handling only activates for PDF link annotations whose visible label
