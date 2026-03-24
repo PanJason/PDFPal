@@ -13,6 +13,7 @@ struct ClaudeClientConfiguration {
     static let defaultModel = "claude-sonnet-4-5-20250929"
     static let defaultVersion = "2023-06-01"
     static let filesBetaHeader = "files-api-2025-04-14"
+    static let webSearchBetaHeader = "web-search-2025-03-05"
     static let defaultMaxTokens = 1024
 
     static func load() -> ClaudeClientConfiguration {
@@ -205,6 +206,7 @@ struct ClaudeStreamingClient: LLMClient {
 
         let system = buildSystemPrompt(for: request)
         let messageContent = buildMessageContent(for: request)
+        let tools: [ClaudeTool]? = request.webSearchEnabled ? [.webSearch] : nil
         let payload = ClaudeRequestBody(
             model: configuration.model,
             maxTokens: configuration.maxTokens,
@@ -212,7 +214,8 @@ struct ClaudeStreamingClient: LLMClient {
             messages: [
                 ClaudeMessage(role: "user", content: messageContent)
             ],
-            stream: stream
+            stream: stream,
+            tools: tools
         )
 
         let encoder = JSONEncoder()
@@ -225,9 +228,15 @@ struct ClaudeStreamingClient: LLMClient {
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         urlRequest.setValue(configuration.apiVersion, forHTTPHeaderField: "anthropic-version")
-        if request.fileID?.isEmpty == false {
-            urlRequest.setValue(ClaudeClientConfiguration.filesBetaHeader, forHTTPHeaderField: "anthropic-beta")
+
+        let needsFilesBeta = request.fileID?.isEmpty == false || !request.attachments.isEmpty
+        var betaHeaders: [String] = []
+        if needsFilesBeta { betaHeaders.append(ClaudeClientConfiguration.filesBetaHeader) }
+        if request.webSearchEnabled { betaHeaders.append(ClaudeClientConfiguration.webSearchBetaHeader) }
+        if !betaHeaders.isEmpty {
+            urlRequest.setValue(betaHeaders.joined(separator: ","), forHTTPHeaderField: "anthropic-beta")
         }
+
         if stream {
             urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         }
@@ -259,6 +268,17 @@ struct ClaudeStreamingClient: LLMClient {
         if let fileID = request.fileID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !fileID.isEmpty {
             content.append(.document(fileID: fileID))
+        }
+
+        for attachment in request.attachments {
+            let fileID = attachment.fileID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fileID.isEmpty else { continue }
+            switch attachment.kind {
+            case .file:
+                content.append(.document(fileID: fileID))
+            case .image:
+                content.append(.image(fileID: fileID))
+            }
         }
 
         return content
@@ -298,6 +318,7 @@ private struct ClaudeRequestBody: Encodable {
     let system: String?
     let messages: [ClaudeMessage]
     let stream: Bool
+    let tools: [ClaudeTool]?
 
     private enum CodingKeys: String, CodingKey {
         case model
@@ -305,7 +326,15 @@ private struct ClaudeRequestBody: Encodable {
         case system
         case messages
         case stream
+        case tools
     }
+}
+
+private struct ClaudeTool: Encodable {
+    let type: String
+    let name: String
+
+    static let webSearch = ClaudeTool(type: "web_search_20250305", name: "web_search")
 }
 
 private struct ClaudeMessage: Encodable {
@@ -329,7 +358,11 @@ private struct ClaudeContent: Encodable {
     }
 
     static func document(fileID: String) -> ClaudeContent {
-        ClaudeContent(type: "document", text: nil, source: ClaudeDocumentSource(fileID: fileID))
+        ClaudeContent(type: "document", text: nil, source: ClaudeDocumentSource(type: "file", fileID: fileID))
+    }
+
+    static func image(fileID: String) -> ClaudeContent {
+        ClaudeContent(type: "image", text: nil, source: ClaudeDocumentSource(type: "file", fileID: fileID))
     }
 }
 
@@ -342,8 +375,8 @@ private struct ClaudeDocumentSource: Encodable {
         case fileID = "file_id"
     }
 
-    init(fileID: String) {
-        self.type = "file"
+    init(type: String = "file", fileID: String) {
+        self.type = type
         self.fileID = fileID
     }
 }
@@ -399,7 +432,8 @@ struct ClaudeFileClient {
         let apiKey = try apiKeyProvider.loadAPIKey()
         let endpoint = try filesEndpoint()
         let boundary = "Boundary-\(UUID().uuidString)"
-        let body = makeMultipartBody(fileData: fileData, fileName: fileURL.lastPathComponent, boundary: boundary)
+        let mimeType = mimeType(for: fileURL)
+        let body = makeMultipartBody(fileData: fileData, fileName: fileURL.lastPathComponent, boundary: boundary, mimeType: mimeType)
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -468,16 +502,23 @@ struct ClaudeFileClient {
         return url
     }
 
-    private func makeMultipartBody(fileData: Data, fileName: String, boundary: String) -> Data {
-        var body = Data()
+    private func mimeType(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "jpg", "jpeg": return "image/jpeg"
+        case "png":         return "image/png"
+        case "gif":         return "image/gif"
+        case "webp":        return "image/webp"
+        default:            return "application/pdf"
+        }
+    }
 
+    private func makeMultipartBody(fileData: Data, fileName: String, boundary: String, mimeType: String) -> Data {
+        var body = Data()
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: application/pdf\r\n\r\n".data(using: .utf8)!)
+        body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
         body.append(fileData)
-        body.append("\r\n".data(using: .utf8)!)
-
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
         return body
     }
 
