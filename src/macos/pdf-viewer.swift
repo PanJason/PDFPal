@@ -1075,18 +1075,18 @@ final class PDFKitView: PDFView {
     private var currentSearchMatchIndex: Int?
     private var pendingActionAnnotation: PDFAnnotation?
     private var shouldSuppressMouseUpAfterCitationIntercept = false
-    // Active-annotation live note polling
+    // Active-annotation note editor tracking
     private var activeAnnotation: PDFAnnotation?
     private var activeFallbackPage: PDFPage?
     private var lastPublishedNoteContents: String = ""
-    private var activeAnnotationMonitorTimer: Timer?
     private var lastPublishedSelectionBase: AnnotationRenderSelection?
-    private var wasLiveEditingNoteVisible = false
     private var observedNoteEditorWindow: NSWindow?
     private var noteEditorWindowObserver: NSObjectProtocol?
+    private var noteEditorKeyWindowObserver: NSObjectProtocol?
+    private var noteEditorBeginEditingObserver: NSObjectProtocol?
     private var observedNoteEditorTextView: NSTextView?
-    private var noteEditorTextObserver: NSObjectProtocol?
-    private let noteEditorMonitorInterval: TimeInterval = 0.05
+    private var noteEditorTextChangeObserver: NSObjectProtocol?
+    private var noteEditorTextEndObserver: NSObjectProtocol?
     private let noteEditorNormalizationFollowUpDelay: TimeInterval = 0.04
 
     override init(frame frameRect: NSRect) {
@@ -1096,6 +1096,7 @@ final class PDFKitView: PDFView {
         registerSaveObserver()
         registerSearchNavigationObservers()
         registerCitationNavigationObserver()
+        registerNoteEditorObservers()
     }
 
     required init?(coder: NSCoder) {
@@ -1105,11 +1106,11 @@ final class PDFKitView: PDFView {
         registerSaveObserver()
         registerSearchNavigationObservers()
         registerCitationNavigationObserver()
+        registerNoteEditorObservers()
     }
 
     deinit {
         pendingModeApplyWorkItem?.cancel()
-        activeAnnotationMonitorTimer?.invalidate()
         removeObservedNoteEditorArtifacts()
         if let annotationObserver {
             NotificationCenter.default.removeObserver(annotationObserver)
@@ -1131,6 +1132,12 @@ final class PDFKitView: PDFView {
         }
         if let citationNavigationObserver {
             NotificationCenter.default.removeObserver(citationNavigationObserver)
+        }
+        if let noteEditorKeyWindowObserver {
+            NotificationCenter.default.removeObserver(noteEditorKeyWindowObserver)
+        }
+        if let noteEditorBeginEditingObserver {
+            NotificationCenter.default.removeObserver(noteEditorBeginEditingObserver)
         }
     }
 
@@ -1932,6 +1939,26 @@ final class PDFKitView: PDFView {
         ) { [weak self] note in
             guard let selection = note.object as? CitationLinkSelection else { return }
             self?.goToCitationDestination(selection)
+        }
+    }
+
+    private func registerNoteEditorObservers() {
+        noteEditorKeyWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, self.activeAnnotation != nil else { return }
+            self.observeActiveNoteEditorWindowIfNeeded(preferredWindow: note.object as? NSWindow)
+        }
+
+        noteEditorBeginEditingObserver = NotificationCenter.default.addObserver(
+            forName: NSText.didBeginEditingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, self.activeAnnotation != nil else { return }
+            self.observeActiveNoteEditorWindowIfNeeded(preferredTextView: note.object as? NSTextView)
         }
     }
 
@@ -2887,7 +2914,6 @@ final class PDFKitView: PDFView {
             activeFallbackPage = nil
             lastPublishedNoteContents = ""
             lastPublishedSelectionBase = nil
-            wasLiveEditingNoteVisible = false
             stopActiveAnnotationMonitoring()
             onAnnotationSelectionChanged?(nil)
             return
@@ -2910,18 +2936,13 @@ final class PDFKitView: PDFView {
     }
 
     private func startActiveAnnotationMonitoring() {
-        guard activeAnnotationMonitorTimer == nil else { return }
-        let timer = Timer.scheduledTimer(withTimeInterval: noteEditorMonitorInterval, repeats: true) { [weak self] _ in
-            self?.pollActiveAnnotationNote()
+        observeActiveNoteEditorWindowIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            self?.observeActiveNoteEditorWindowIfNeeded()
         }
-        RunLoop.main.add(timer, forMode: .common)
-        activeAnnotationMonitorTimer = timer
     }
 
     private func stopActiveAnnotationMonitoring() {
-        activeAnnotationMonitorTimer?.invalidate()
-        activeAnnotationMonitorTimer = nil
-        wasLiveEditingNoteVisible = false
         removeObservedNoteEditorArtifacts()
     }
 
@@ -2941,45 +2962,6 @@ final class PDFKitView: PDFView {
             return textView.string
         }
         return nil
-    }
-
-    private func pollActiveAnnotationNote() {
-        guard let annotation = activeAnnotation else {
-            stopActiveAnnotationMonitoring()
-            return
-        }
-        // While the PDFKit popup/inline editor is open, read live text from the
-        // first responder — annotation.contents is only committed on popup close.
-        if let live = liveEditingText() {
-            wasLiveEditingNoteVisible = true
-            observeActiveNoteEditorWindowIfNeeded()
-            publishNoteContentsUpdate(live)
-            return
-        }
-        if wasLiveEditingNoteVisible {
-            wasLiveEditingNoteVisible = false
-            normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: activeFallbackPage)
-            DispatchQueue.main.asyncAfter(deadline: .now() + noteEditorNormalizationFollowUpDelay) { [weak self] in
-                self?.normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: self?.activeFallbackPage)
-            }
-        }
-        // Popup is closed — fall back to committed annotation.contents.
-        guard let target = resolvedAnnotationRenderTarget(for: annotation, fallbackPage: activeFallbackPage) else {
-            return
-        }
-        guard target.rawText != lastPublishedNoteContents else { return }
-        lastPublishedNoteContents = target.rawText
-        let documentPath = document?.documentURL?.path ?? ""
-        let pageIndex = document.flatMap { $0.index(for: target.page) } ?? 0
-        let selection = AnnotationRenderSelection(
-            documentPath: documentPath,
-            pageIndex: pageIndex,
-            annotationBounds: target.bounds,
-            rawText: target.rawText,
-            authorName: target.authorName
-        )
-        lastPublishedSelectionBase = selection
-        onAnnotationSelectionChanged?(selection)
     }
 
     private func beginPendingMarkupNoteSelection(for markup: PDFAnnotation, on page: PDFPage) {
@@ -3043,15 +3025,30 @@ final class PDFKitView: PDFView {
         return false
     }
 
-    private func observeActiveNoteEditorWindowIfNeeded() {
-        if let textView = activeNoteEditorTextView() {
+    private func observeActiveNoteEditorWindowIfNeeded(
+        preferredTextView: NSTextView? = nil,
+        preferredWindow: NSWindow? = nil
+    ) {
+        if let textView = preferredTextView ?? activeNoteEditorTextView(preferredWindow: preferredWindow) {
             if observedNoteEditorTextView !== textView {
-                if let noteEditorTextObserver {
-                    NotificationCenter.default.removeObserver(noteEditorTextObserver)
-                    self.noteEditorTextObserver = nil
+                if let noteEditorTextChangeObserver {
+                    NotificationCenter.default.removeObserver(noteEditorTextChangeObserver)
+                    self.noteEditorTextChangeObserver = nil
+                }
+                if let noteEditorTextEndObserver {
+                    NotificationCenter.default.removeObserver(noteEditorTextEndObserver)
+                    self.noteEditorTextEndObserver = nil
                 }
                 observedNoteEditorTextView = textView
-                noteEditorTextObserver = NotificationCenter.default.addObserver(
+                noteEditorTextChangeObserver = NotificationCenter.default.addObserver(
+                    forName: NSText.didChangeNotification,
+                    object: textView,
+                    queue: .main
+                ) { [weak self] note in
+                    guard let textView = note.object as? NSTextView else { return }
+                    self?.publishNoteContentsUpdate(textView.string)
+                }
+                noteEditorTextEndObserver = NotificationCenter.default.addObserver(
                     forName: NSText.didEndEditingNotification,
                     object: textView,
                     queue: .main
@@ -3059,11 +3056,13 @@ final class PDFKitView: PDFView {
                     self?.handleObservedNoteEditorWindowClosed()
                 }
             }
+            publishNoteContentsUpdate(textView.string)
         }
 
-        guard let keyWindow = NSApp.keyWindow,
+        let candidateWindow = preferredWindow ?? observedNoteEditorTextView?.window ?? NSApp.keyWindow
+        guard let keyWindow = candidateWindow,
               keyWindow !== self.window,
-              keyWindow.firstResponder is NSTextView
+              (keyWindow.firstResponder is NSTextView || observedNoteEditorTextView?.window === keyWindow)
         else {
             return
         }
@@ -3083,8 +3082,8 @@ final class PDFKitView: PDFView {
         }
     }
 
-    private func activeNoteEditorTextView() -> NSTextView? {
-        if let keyWindow = NSApp.keyWindow,
+    private func activeNoteEditorTextView(preferredWindow: NSWindow? = nil) -> NSTextView? {
+        if let keyWindow = preferredWindow ?? NSApp.keyWindow,
            keyWindow !== self.window,
            let textView = keyWindow.firstResponder as? NSTextView {
             return textView
@@ -3101,18 +3100,22 @@ final class PDFKitView: PDFView {
             NotificationCenter.default.removeObserver(noteEditorWindowObserver)
             self.noteEditorWindowObserver = nil
         }
-        if let noteEditorTextObserver {
-            NotificationCenter.default.removeObserver(noteEditorTextObserver)
-            self.noteEditorTextObserver = nil
+        if let noteEditorTextChangeObserver {
+            NotificationCenter.default.removeObserver(noteEditorTextChangeObserver)
+            self.noteEditorTextChangeObserver = nil
+        }
+        if let noteEditorTextEndObserver {
+            NotificationCenter.default.removeObserver(noteEditorTextEndObserver)
+            self.noteEditorTextEndObserver = nil
         }
         observedNoteEditorWindow = nil
         observedNoteEditorTextView = nil
     }
 
     private func handleObservedNoteEditorWindowClosed() {
+        commitLiveEditingNoteIfNeeded()
         removeObservedNoteEditorArtifacts()
         guard let annotation = activeAnnotation else { return }
-        wasLiveEditingNoteVisible = false
 
         normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: activeFallbackPage)
         DispatchQueue.main.asyncAfter(deadline: .now() + noteEditorNormalizationFollowUpDelay) { [weak self] in
