@@ -22,6 +22,7 @@ struct ChatPanel: View {
     @State private var keyPromptModel: LLMModel
     @State private var streamTask: Task<Void, Never>? = nil
     @State private var activeStreamId: UUID? = nil
+    @State private var streamingAssistantMessageId: UUID? = nil
     @State private var hasReceivedDelta = false
     @Binding var isSessionSidebarVisible: Bool
     @State private var isHoveringFoldHandle = false
@@ -216,7 +217,10 @@ struct ChatPanel: View {
                             .padding(.vertical, 8)
                     }
                     ForEach(activeMessages) { message in
-                        ChatMessageRow(message: message)
+                        ChatMessageRow(
+                            message: message,
+                            isStreaming: message.id == streamingAssistantMessageId
+                        )
                     }
                     if isSending && !hasReceivedDelta {
                         ChatLoadingRow()
@@ -584,6 +588,7 @@ struct ChatPanel: View {
     }
 
     private func appendAssistantDelta(_ delta: String, assistantId: UUID) {
+        streamingAssistantMessageId = assistantId
         if !hasReceivedDelta {
             sessionStore.appendMessage(ChatMessage(id: assistantId, role: .assistant, text: delta))
             hasReceivedDelta = true
@@ -603,12 +608,14 @@ struct ChatPanel: View {
                 message.text = text
             }
         }
+        streamingAssistantMessageId = nil
     }
 
     private func handleStreamError(_ error: Error, streamId: UUID) {
         guard activeStreamId == streamId else { return }
         isSending = false
         activeStreamId = nil
+        streamingAssistantMessageId = nil
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         errorMessage = message
     }
@@ -774,6 +781,7 @@ struct ChatPanel: View {
         streamTask?.cancel()
         streamTask = nil
         activeStreamId = nil
+        streamingAssistantMessageId = nil
         hasReceivedDelta = false
         isSending = false
     }
@@ -1364,7 +1372,9 @@ private enum ChatScrollAnchor {
 
 struct ChatMessageRow: View {
     let message: ChatMessage
+    let isStreaming: Bool
     @State private var isContextExpanded = false
+    @State private var isShowingOriginal = false
     @State private var measuredBubbleWidth: CGFloat = 0
     private let bubblePadding: CGFloat = 12
     private let bubbleMaxWidth: CGFloat = 360
@@ -1384,11 +1394,9 @@ struct ChatMessageRow: View {
     private var bubble: some View {
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
             VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
-                Text(message.text)
-                    .font(.body)
-                    .multilineTextAlignment(message.role == .user ? .trailing : .leading)
-                    .textSelection(.enabled)
+                messageBody
 
+                renderToggleButton
                 contextToggleButton
             }
             .padding(bubblePadding)
@@ -1416,6 +1424,43 @@ struct ChatMessageRow: View {
                     .cornerRadius(10)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
+        }
+    }
+
+    @ViewBuilder
+    private var messageBody: some View {
+        if shouldRenderRichContent && !isShowingOriginal {
+            ChatRenderedMessageView(
+                markdown: message.text,
+                role: message.role
+            )
+        } else {
+            Text(message.text)
+                .font(.body)
+                .multilineTextAlignment(message.role == .user ? .trailing : .leading)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var shouldRenderRichContent: Bool {
+        guard !isStreaming else { return false }
+        return ChatMarkdownHeuristics.shouldRender(message.text)
+    }
+
+    @ViewBuilder
+    private var renderToggleButton: some View {
+        if shouldRenderRichContent {
+            Button {
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    isShowingOriginal.toggle()
+                }
+            } label: {
+                Text(isShowingOriginal ? "Show rendered" : "Show original")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isShowingOriginal ? "Show rendered message" : "Show original message")
         }
     }
 
@@ -1457,6 +1502,144 @@ struct ChatMessageRow: View {
                 .imageScale(.small)
                 .foregroundColor(.secondary)
         }
+    }
+}
+
+private enum ChatMarkdownHeuristics {
+    static func shouldRender(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let patterns = [
+            #"(?m)^\s{0,3}#{1,6}\s+\S"#,
+            #"\*\*.+?\*\*"#,
+            #"(?<!\*)\*(?!\s).+?(?<!\s)\*"#,
+            #"`[^`]+`"#,
+            #"(?s)```.+?```"#,
+            #"\[[^\]]+\]\([^)]+\)"#,
+            #"(?m)^\s{0,3}(?:[-*+]\s+|\d+\.\s+)"#,
+            #"(?m)^\s{0,3}>\s+"#,
+            #"(?m)^\|.+\|$"#,
+            #"(?s)\$\$.*?\$\$"#,
+            #"(?<!\$)\$[^$\n]+\$"#,
+            #"(?m)^```math\s*$"#
+        ]
+
+        return patterns.contains { pattern in
+            trimmed.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+}
+
+private struct ChatRenderedMessageView: View {
+    let markdown: String
+    let role: ChatRole
+
+    @State private var renderResult: RenderResult = .empty
+    @State private var contentHeight: CGFloat = 44
+
+    private static let pipeline = RenderPipeline()
+
+    var body: some View {
+        Group {
+            let styledResult = chatStyledResult
+
+            if styledResult.html.isEmpty {
+                Text(markdown)
+                    .font(.body)
+                    .multilineTextAlignment(role == .user ? .trailing : .leading)
+                    .textSelection(.enabled)
+            } else {
+                RenderView(
+                    result: styledResult,
+                    baseURL: nil,
+                    allowsScrolling: false,
+                    onContentHeightChange: { height in
+                        contentHeight = max(32, height)
+                    }
+                )
+                .frame(height: contentHeight)
+            }
+        }
+        .task(id: markdown) {
+            let result = await Self.pipeline.render(
+                RenderContent(
+                    source: markdown,
+                    format: .markdown,
+                    baseURL: nil,
+                    isTrusted: false
+                )
+            )
+            renderResult = result
+        }
+    }
+
+    private var chatStyledResult: RenderResult {
+        guard !renderResult.html.isEmpty else { return renderResult }
+        let overrides = """
+        <style>
+        :root {
+            --text: #1f1f1f;
+            --muted: #666666;
+            --border: rgba(0, 0, 0, 0.12);
+            --bg: transparent;
+            --panel: transparent;
+            --accent: #0a66d9;
+            --code-bg: rgba(0, 0, 0, 0.06);
+        }
+        html, body {
+            background: transparent !important;
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+            font-size: 15px;
+            line-height: 1.42;
+        }
+        body {
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+        p, ul, ol, blockquote, pre, table {
+            margin: 0 0 10px;
+        }
+        p:last-child, ul:last-child, ol:last-child, blockquote:last-child, pre:last-child, table:last-child {
+            margin-bottom: 0;
+        }
+        h1, h2, h3, h4, h5, h6 {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+            font-weight: 600;
+            margin: 0 0 8px;
+            line-height: 1.24;
+        }
+        h1 { font-size: 19px; }
+        h2 { font-size: 18px; }
+        h3, h4, h5, h6 { font-size: 16px; }
+        ul, ol {
+            padding-left: 26px;
+            margin-left: 2px;
+        }
+        li + li {
+            margin-top: 4px;
+        }
+        li::marker {
+            font-variant-numeric: tabular-nums;
+        }
+        blockquote {
+            padding-left: 10px;
+        }
+        pre {
+            padding: 10px 12px;
+            border-radius: 8px;
+        }
+        code {
+            font-size: 0.92em;
+        }
+        table {
+            font-size: 14px;
+        }
+        </style>
+        """
+        let html = renderResult.html.replacingOccurrences(of: "</head>", with: "\(overrides)</head>")
+        return RenderResult(html: html, warnings: renderResult.warnings)
     }
 }
 
