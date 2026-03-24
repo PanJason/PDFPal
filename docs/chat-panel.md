@@ -9,8 +9,8 @@ Gemini, Qwen), and streaming updates from the LLM service. A hover-only fold con
 lets the user hide or show the session sidebar. The composer now also supports
 ChatGPT-style rich input actions from a `+` menu, removable attachment chips
 with Quick Look, and a web-search toggle rendered as a pill when enabled. The
-provider support is staged: OpenAI supports files, images, camera capture, and
-web search; Qwen supports image-style attachments and web search.
+provider support is staged: OpenAI and Gemini support files, images, camera
+capture, and web search; Qwen supports image-style attachments and web search.
 
 ## Public API
 ```swift
@@ -143,12 +143,14 @@ struct LLMModel: Identifiable {}
   DashScope-compatible chat completions API.
 - Qwen web search is enabled through the provider's `enable_search` request
   parameter.
+- For Gemini models, the composer uploads additional files and images through
+  `GeminiFileClient` and sends them as `fileData` parts alongside the session
+  PDF. Gemini web search is enabled through the `google_search` tool.
 - Deleting an OpenAI, Claude, or Gemini session also attempts to delete its
   uploaded file from the provider Files API.
 - Qwen sessions do not upload generic files; the current rich composer support
   there is limited to image-style attachments.
-- Claude remains unchanged, and Gemini has not been wired into the rich
-  composer controls yet.
+- Claude remains unchanged.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples
