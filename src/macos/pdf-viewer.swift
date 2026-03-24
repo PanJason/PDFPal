@@ -1048,8 +1048,10 @@ private struct PDFDocumentSidebarContentView: View {
     }
 }
 
-final class PDFKitView: PDFView {
+final class PDFKitView: PDFView, NSMenuItemValidation {
     private static let markupGroupPrefix = "pdfpal-group:"
+    private static let askLLMMenuTag = 9100
+    private static let noteEditorAskLLMMenuTag = 9101
 
     var onAskLLM: ((String) -> Void)?
     var onAnnotationSelectionChanged: AnnotationSelectionHandler?
@@ -1415,7 +1417,7 @@ final class PDFKitView: PDFView {
         let askItem = NSMenuItem(title: "Ask LLM", action: #selector(handleAskLLM), keyEquivalent: "")
         askItem.target = self
         askItem.isEnabled = !askContextText.isEmpty
-        askItem.tag = 9100
+        askItem.tag = Self.askLLMMenuTag
         menu.addItem(askItem)
 
         retargetAnnotationMenuItems(in: menu)
@@ -1744,6 +1746,32 @@ final class PDFKitView: PDFView {
             return
         }
         onAskLLM?(selection)
+    }
+
+    @objc private func handleAskLLMFromNoteEditor() {
+        guard let textView = observedNoteEditorTextView ?? activeNoteEditorTextView(),
+              let selectedText = selectedTextForAskLLM(in: textView),
+              !selectedText.isEmpty
+        else {
+            return
+        }
+        onAskLLM?(selectedText)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.tag == Self.noteEditorAskLLMMenuTag {
+            guard let textView = observedNoteEditorTextView ?? activeNoteEditorTextView() else {
+                return false
+            }
+            let selectedText = selectedTextForAskLLM(in: textView) ?? ""
+            return !selectedText.isEmpty
+        }
+
+        if menuItem.tag == Self.askLLMMenuTag {
+            return !lastSelectionText.isEmpty
+        }
+
+        return true
     }
 
     @objc private func handleRemoveAnnotation() {
@@ -3186,6 +3214,7 @@ final class PDFKitView: PDFView {
                     self?.commitLiveEditingNoteIfNeeded()
                 }
             }
+            installAskLLMMenuItemIfNeeded(on: textView)
             publishNoteContentsUpdate(textView.string)
         }
 
@@ -3244,6 +3273,40 @@ final class PDFKitView: PDFView {
             return textView
         }
         return nil
+    }
+
+    private func installAskLLMMenuItemIfNeeded(on textView: NSTextView) {
+        let menu = textView.menu ?? NSMenu(title: "Text")
+        menu.items.removeAll { $0.tag == Self.noteEditorAskLLMMenuTag }
+
+        let hasContentItems = !menu.items.isEmpty
+        if hasContentItems, menu.items.last?.isSeparatorItem == false {
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        let askItem = NSMenuItem(
+            title: "Ask LLM",
+            action: #selector(handleAskLLMFromNoteEditor),
+            keyEquivalent: ""
+        )
+        askItem.target = self
+        askItem.tag = Self.noteEditorAskLLMMenuTag
+        askItem.isEnabled = validateMenuItem(askItem)
+        menu.addItem(askItem)
+        textView.menu = menu
+    }
+
+    private func selectedTextForAskLLM(in textView: NSTextView) -> String? {
+        let selectedRange = textView.selectedRange()
+        guard selectedRange.location != NSNotFound, selectedRange.length > 0 else {
+            return nil
+        }
+
+        let nsString = textView.string as NSString
+        guard NSMaxRange(selectedRange) <= nsString.length else { return nil }
+        let selectedText = nsString.substring(with: selectedRange)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return selectedText.isEmpty ? nil : selectedText
     }
 
     private func activeMarkupClusterForObservedNote() -> (cluster: [PDFAnnotation], page: PDFPage)? {
