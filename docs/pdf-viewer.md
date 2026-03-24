@@ -112,6 +112,12 @@ struct PDFEmptyState: View {}
   `Notification.Name.pdfApplyAnnotation`.
 - `PDFKitView` listens for `Notification.Name.pdfSaveDocument` and writes the
   current document back to `documentURL`.
+- While a PDFKit note popup is open, `PDFKitView` observes the active popup
+  window and text view so note preview updates can follow live typing without a
+  polling timer.
+- If `Cmd+S` is pressed while a note popup is still open, the save is deferred
+  until that popup actually closes. This avoids mutating the note model under an
+  active PDFKit editor session.
 - `PDFKitView` caches the last search signature and re-runs search only when
   document/query/mode change.
 - `PDFKitView` also resolves the currently selected/opened annotation note into
@@ -131,7 +137,8 @@ struct PDFEmptyState: View {}
 - Toolbar highlight actions post a `PDFAnnotationAction` notification that the
   active PDF view applies to the current selection.
 - File menu save (`Cmd+S`) posts `pdfSaveDocument`; the PDF view persists all
-  annotation and note edits to disk.
+  annotation and note edits to disk. If a note popup is still open, the save is
+  deferred and runs automatically after the popup closes.
 - App shell search state (`searchQuery`, `searchMode`) is passed to
   `PDFKitView`, which executes synchronous document search via PDFKit.
 - App shell sidebar state (`sidebarMode`) is passed to `PDFReaderContainerView`
@@ -191,6 +198,13 @@ struct PDFEmptyState: View {}
   popup is attached to a markup annotation, the viewer copies that note text
   onto the markup annotation, clears the native popup linkage, and keeps only
   one local note marker in-app so duplicate icons are suppressed.
+- Note editor close is driven by PDFKit popup state, not by text-view focus
+  changes alone. The viewer commits text on `NSText.didEndEditingNotification`,
+  but it only treats the note session as closed when the popup window actually
+  closes.
+- Explicit note dismissal first asks PDFKit to close the related popup
+  annotation by setting the popup annotation's `isOpen` state to `false`. This
+  avoids orphaning a still-visible popup after `Cmd+S` or click-away.
 
 ## Context Menu Markup Picker
 - The annotation context menu keeps a compact first-row markup picker for
@@ -207,6 +221,10 @@ struct PDFEmptyState: View {}
   seeds an empty annotation-preview selection before PDFKit commits the first
   note text. This allows live note typing to render in the right-side preview
   panel on the first open instead of only after closing and reopening the note.
+- Click-away and `Esc` dismissal both route through the same popup-close path.
+  The viewer commits the latest live text, asks PDFKit to close the popup, then
+  runs note normalization and any deferred save work after the real popup close
+  event.
 - For grouped multi-line highlights, note presence is resolved at the highlight
   cluster level. If any line in the group has a note, right-clicking any line in
   that group exposes `Remove Note` rather than `Add Note`.
