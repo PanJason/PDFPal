@@ -2766,10 +2766,15 @@ final class PDFKitView: PDFView {
         let markers = resolvedCluster.flatMap { candidateMarkupNoteMarkers(for: $0, on: page) }
         let chosenMarker = (preferredMarker.map { preferred in
             markers.first(where: { $0 === preferred })
-        } ?? nil) ?? preferredMarkupNoteMarker(from: markers)
+        } ?? nil)
+            ?? preferredMarkupNoteMarker(from: markers)
+            ?? markers.max { lhs, rhs in
+                preferredMarkupNoteMarkerSortKey(lhs) < preferredMarkupNoteMarkerSortKey(rhs)
+            }
 
         let marker = chosenMarker ?? {
             guard !trimmedText.isEmpty else { return nil }
+            guard !hasActiveNoteEditorSession() else { return nil }
             let created = makeMarkupNoteMarker(for: anchor, on: page)
             page.addAnnotation(created)
             return created
@@ -3275,12 +3280,12 @@ final class PDFKitView: PDFView {
         let shouldSaveAfterClose = pendingSaveAfterNoteEditorCloses
         pendingSaveAfterNoteEditorCloses = false
 
-        normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: activeFallbackPage)
         DispatchQueue.main.asyncAfter(deadline: .now() + noteEditorNormalizationFollowUpDelay) { [weak self] in
             guard let self else { return }
-            self.normalizeCommittedMarkupNoteIfNeeded(for: annotation, fallbackPage: self.activeFallbackPage)
+            self.publishAnnotationSelection(for: annotation, fallbackPage: self.activeFallbackPage)
+            self.notifyAnnotationsDidChange()
             if shouldSaveAfterClose {
-                self.performDocumentSave(normalizeNotes: true)
+                self.performDocumentSave(normalizeNotes: false)
             }
         }
     }
@@ -4266,7 +4271,7 @@ final class PDFKitView: PDFView {
 
         commitLiveEditingNoteIfNeeded()
         pendingSaveAfterNoteEditorCloses = false
-        performDocumentSave(normalizeNotes: true)
+        performDocumentSave(normalizeNotes: false)
     }
 }
 
