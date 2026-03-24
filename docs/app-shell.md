@@ -14,7 +14,7 @@ It also exposes a model family picker (OpenAI, Claude, Gemini, Qwen) in the tool
 a PDF annotation menu (highlight/underline/strikethrough), and a view menu that
 toggles the chat panel, session sidebar, annotation preview, and PDF sidebar
 mode. The app delegate also applies the app icon at launch using the bundled
-`app_icon.png` asset with a SwiftPM fallback for development. A `File > Save`
+`app_icon.svg` asset with a SwiftPM fallback for development. A `File > Save`
 menu action (`Cmd+S`) is wired to save the current PDF with annotation changes.
 The toolbar also includes a PDF search field with mode switching (`Any Match`
 or `Exact Phrase`) and supports `Cmd+F` to focus the search field.

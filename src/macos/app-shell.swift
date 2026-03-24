@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let currentDirectory = FileManager.default.currentDirectoryPath
-        let fallbackURL = URL(fileURLWithPath: "resource/app_icon.png", relativeTo: URL(fileURLWithPath: currentDirectory))
+        let fallbackURL = URL(fileURLWithPath: "resource/app_icon.svg", relativeTo: URL(fileURLWithPath: currentDirectory))
         return NSImage(contentsOf: fallbackURL)
     }
 }

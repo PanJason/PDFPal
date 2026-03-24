@@ -12,7 +12,7 @@ release:
 	mkdir -p dist/LLMPaperReadingHelper.app/Contents/MacOS
 	mkdir -p dist/LLMPaperReadingHelper.app/Contents/Resources
 	cp .build/release/LLMPaperReadingHelper dist/LLMPaperReadingHelper.app/Contents/MacOS/LLMPaperReadingHelper
-	cp resource/app_icon.png dist/LLMPaperReadingHelper.app/Contents/Resources/app_icon.png
+	cp resource/app_icon.svg dist/LLMPaperReadingHelper.app/Contents/Resources/app_icon.svg
 	printf '%s\n' \
 		'<?xml version="1.0" encoding="UTF-8"?>' \
 		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
