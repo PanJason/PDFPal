@@ -6,11 +6,11 @@ shows the selected PDF context, a scrollable message list, an input composer,
 and UI states for loading and errors with retry. It includes a model picker,
 API key prompt, per-provider session selection sidebar (OpenAI, Claude,
 Gemini, Qwen), and streaming updates from the LLM service. A hover-only fold control
-lets the user hide or show the session sidebar. The composer now also supports
+lets the user hide or show the session sidebar. The composer supports
 ChatGPT-style rich input actions from a `+` menu, removable attachment chips
-with Quick Look, and a web-search toggle rendered as a pill when enabled. The
-provider support is staged: OpenAI and Gemini support files, images, camera
-capture, and web search; Qwen supports image-style attachments and web search.
+with Quick Look, and a web-search toggle rendered as a pill when enabled.
+All four providers (OpenAI, Claude, Gemini, Qwen) support file/image
+attachments, screenshots, camera capture, and web search.
 
 ## Public API
 ```swift
@@ -133,24 +133,22 @@ struct LLMModel: Identifiable {}
 - For OpenAI, Claude, and Gemini sessions, the panel uploads the session PDF
   to the provider Files API before the first prompt, stores the returned
   `fileID` in the session, and reuses it for later prompts.
-- For OpenAI models, the composer can upload additional files and images as
-  per-message attachments. Files are uploaded through `OpenAIFileClient` and
-  sent as `LLMAttachment` entries on the request.
-- The OpenAI composer also exposes a web-search toggle. When enabled, the
-  request includes the provider's web-search preview tool.
-- For Qwen models, the composer accepts image attachments, screenshots, and
-  camera photos. These are encoded as `image_url` content parts for the
-  DashScope-compatible chat completions API.
-- Qwen web search is enabled through the provider's `enable_search` request
-  parameter.
+- For OpenAI models, the composer uploads additional files and images through
+  `OpenAIFileClient` and sends them as `LLMAttachment` entries on the request.
+  Web search uses the `web_search_preview` tool.
+- For Claude models, the composer uploads additional files and images through
+  `ClaudeFileClient` and sends them as `document` or `image` content blocks.
+  Web search uses the `web_search_20250305` tool with the
+  `web-search-2025-03-05` beta header. The `files-api-2025-04-14` beta header
+  is included when file or image attachments are present.
 - For Gemini models, the composer uploads additional files and images through
   `GeminiFileClient` and sends them as `fileData` parts alongside the session
-  PDF. Gemini web search is enabled through the `google_search` tool.
+  PDF. Web search uses the `google_search` tool.
+- For Qwen models, the composer accepts image attachments, screenshots, and
+  camera photos encoded as `image_url` content parts. Web search is enabled
+  through the provider's `enable_search` request parameter.
 - Deleting an OpenAI, Claude, or Gemini session also attempts to delete its
   uploaded file from the provider Files API.
-- Qwen sessions do not upload generic files; the current rich composer support
-  there is limited to image-style attachments.
-- Claude remains unchanged.
 - API keys are stored in Keychain via the prompt sheet.
 
 ## Usage Examples
