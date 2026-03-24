@@ -10,7 +10,10 @@ lets the user hide or show the session sidebar. The composer supports
 ChatGPT-style rich input actions from a `+` menu, removable attachment chips
 with Quick Look, and a web-search toggle rendered as a pill when enabled.
 All four providers (OpenAI, Claude, Gemini, Qwen) support file/image
-attachments, screenshots, camera capture, and web search.
+attachments, screenshots, camera capture, and web search. Completed user and
+assistant messages can also render through the shared Markdown/math pipeline
+when the content looks like Markdown, while streamed assistant output remains
+plain text until completion.
 
 ## Public API
 ```swift
@@ -112,6 +115,13 @@ struct LLMModel: Identifiable {}
   support it, the globe expands into a rounded search pill and the outgoing
   request opts into provider-side web search.
 - Assistant messages align to the left, while user messages align to the right.
+- Chat bubbles classify completed messages heuristically. If Markdown or math is
+  detected, the message is rendered with the shared web-based render pipeline;
+  otherwise the bubble stays on the lightweight `Text` path.
+- Assistant responses remain plain text while streaming, then switch to rendered
+  output after completion when the content qualifies.
+- Rendered chat bubbles expose a small `Show original` / `Show rendered` toggle
+  so the user can compare the rendered output against the raw Markdown source.
 - User messages that include context show a context icon on the bubble. Tapping
   the icon reveals the stored context beneath the message.
 - Session rows show the associated PDF filename, a file icon that opens the
@@ -147,6 +157,9 @@ struct LLMModel: Identifiable {}
 - For Qwen models, the composer accepts image attachments, screenshots, and
   camera photos encoded as `image_url` content parts. Web search is enabled
   through the provider's `enable_search` request parameter.
+- The shared `RenderView` is also reused inside chat bubbles with chat-specific
+  CSS overrides and dynamic height measurement so rendered messages match the
+  plain bubble styling more closely.
 - Deleting an OpenAI, Claude, or Gemini session also attempts to delete its
   uploaded file from the provider Files API.
 - API keys are stored in Keychain via the prompt sheet.
