@@ -1052,6 +1052,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private static let markupGroupPrefix = "pdfpal-group:"
     private static let askLLMMenuTag = 9100
     private static let noteEditorAskLLMMenuTag = 9101
+    private static let citationDebugLoggingEnabled = true
 
     var onAskLLM: ((String) -> Void)?
     var onAnnotationSelectionChanged: AnnotationSelectionHandler?
@@ -3637,6 +3638,20 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             on: page
         )
         guard !labelText.isEmpty else { return nil }
+        let referenceText = destinationPage.map {
+            referenceContextText(
+                around: destinationPoint,
+                on: $0,
+                matching: labelText
+            )
+        }
+
+        debugLogCitationResolution(
+            labelText: labelText,
+            destinationPage: destinationPage,
+            destinationPoint: destinationPoint,
+            referenceText: referenceText
+        )
 
         return ResolvedCitationLinkTarget(
             sourcePage: page,
@@ -3646,13 +3661,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             destinationPage: destinationPage,
             destinationPoint: destinationPoint,
             externalURL: externalURL,
-            referenceText: destinationPage.map {
-                referenceContextText(
-                    around: destinationPoint,
-                    on: $0,
-                    matching: labelText
-                )
-            }
+            referenceText: referenceText
         )
     }
 
@@ -3943,10 +3952,14 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         matching labelText: String
     ) -> String {
         let nearbyLines = nearbyReferenceLines(around: point, on: page)
-        if let matchedEntry = bestMatchingReferenceEntry(
-            for: labelText,
-            among: nearbyLines
-        ) {
+        let scoredEntries = scoredReferenceEntries(for: labelText, among: nearbyLines)
+        debugLogReferenceCandidates(
+            page: page,
+            point: point,
+            labelText: labelText,
+            scoredEntries: scoredEntries
+        )
+        if let matchedEntry = scoredEntries.first(where: { $0.score > 0 })?.entry {
             return matchedEntry
         }
 
@@ -3987,6 +4000,22 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         }
 
         return lines.joined(separator: " ")
+    }
+
+    private func scoredReferenceEntries(
+        for labelText: String,
+        among lines: [ReferenceLineCandidate]
+    ) -> [(entry: String, score: Int)] {
+        guard !lines.isEmpty else { return [] }
+        let fingerprint = citationLabelFingerprint(from: labelText)
+        return lines.indices.map { startIndex in
+            let entry = collectReferenceEntry(startingAt: startIndex, from: lines)
+            let score = referenceEntryScore(entry, fingerprint: fingerprint)
+            return (entry: entry, score: score)
+        }
+        .sorted { lhs, rhs in
+            lhs.score > rhs.score
+        }
     }
 
     private func nearbyReferenceLines(
@@ -4124,6 +4153,49 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         }
 
         return score
+    }
+
+    private func debugLogCitationResolution(
+        labelText: String,
+        destinationPage: PDFPage?,
+        destinationPoint: CGPoint?,
+        referenceText: String?
+    ) {
+        guard Self.citationDebugLoggingEnabled else { return }
+        let destinationPageIndex = destinationPage.flatMap { document?.index(for: $0) } ?? -1
+        let pointSummary = destinationPoint.map { "(\(Int($0.x.rounded())), \(Int($0.y.rounded())))" } ?? "nil"
+        Swift.print("""
+        [citation-debug] resolved
+          label=\(labelText)
+          destinationPage=\(destinationPageIndex) destinationPoint=\(pointSummary)
+          reference=\(debugCitationSnippet(referenceText))
+        """)
+    }
+
+    private func debugLogReferenceCandidates(
+        page: PDFPage,
+        point: CGPoint?,
+        labelText: String,
+        scoredEntries: [(entry: String, score: Int)]
+    ) {
+        guard Self.citationDebugLoggingEnabled else { return }
+        let pageIndex = document?.index(for: page) ?? -1
+        let pointSummary = point.map { "(\(Int($0.x.rounded())), \(Int($0.y.rounded())))" } ?? "nil"
+        let topEntries = scoredEntries.prefix(5).enumerated().map { index, item in
+            "    [\(index + 1)] score=\(item.score) entry=\(debugCitationSnippet(item.entry))"
+        }.joined(separator: "\n")
+        Swift.print("""
+        [citation-debug] candidates
+          page=\(pageIndex) point=\(pointSummary)
+          label=\(labelText)
+        \(topEntries)
+        """)
+    }
+
+    private func debugCitationSnippet(_ text: String?) -> String {
+        let cleaned = cleanCitationText(text ?? "")
+        guard !cleaned.isEmpty else { return "nil" }
+        return cleaned.count <= 220 ? cleaned : String(cleaned.prefix(220)) + "..."
     }
 
     private func lineSelection(atCharacterIndex index: Int, on page: PDFPage) -> PDFSelection? {
