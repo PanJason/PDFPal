@@ -4201,13 +4201,26 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let halfHeight = typographyMetrics(for: page).lineSpacing * 6
         // Restrict the scan to the column that contains the destination point so
         // that references from adjacent columns in multi-column layouts are excluded.
-        let col = columnLayout(for: page).column(containing: point?.x ?? pageBounds.midX)
+        let layout = columnLayout(for: page)
+        let col = layout.column(containing: point?.x ?? pageBounds.midX)
         let scanRect = CGRect(
             x: col.lowerBound,
             y: max(pageBounds.minY, anchorY - halfHeight),
             width: col.upperBound - col.lowerBound,
             height: min(pageBounds.height, halfHeight * 2)
         )
+
+        if Self.citationDebugLoggingEnabled {
+            let pageIndex = document?.index(for: page) ?? -1
+            let colSummary = layout.columns.map {
+                "[\(Int($0.lowerBound))–\(Int($0.upperBound))]"
+            }.joined(separator: ", ")
+            Swift.print("""
+            [citation-debug] nearbyReferenceLines
+              page=\(pageIndex) anchorY=\(Int(anchorY.rounded())) halfHeight=\(Int(halfHeight.rounded()))
+              columns=\(colSummary)  scanRect=x:\(Int(scanRect.minX)) w:\(Int(scanRect.width)) y:\(Int(scanRect.minY))–\(Int(scanRect.maxY))
+            """)
+        }
 
         guard let selection = page.selection(for: scanRect) else { return [] }
         let lines = selection.selectionsByLine()
@@ -4221,9 +4234,18 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
                 return ReferenceLineCandidate(text: text, range: range)
             }
 
-        return lines.sorted { lhs, rhs in
-            lhs.range.location < rhs.range.location
+        let sorted = lines.sorted { lhs, rhs in lhs.range.location < rhs.range.location }
+
+        if Self.citationDebugLoggingEnabled {
+            let style = isNumericReferenceList(sorted) ? "numeric" : "author-year"
+            let preview = sorted.prefix(6).map { "    \($0.text.prefix(60))" }.joined(separator: "\n")
+            Swift.print("""
+            [citation-debug] referenceLines style=\(style) count=\(sorted.count)
+            \(preview)
+            """)
         }
+
+        return sorted
     }
 
     private func bestMatchingReferenceEntry(
@@ -4247,22 +4269,41 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         return bestScore > 0 ? bestEntry : nil
     }
 
+    /// Returns true when `lines` look like a numeric reference list (i.e. "[1]", "1.", …).
+    /// At least two of the first twelve candidates must carry a numeric marker.
+    private func isNumericReferenceList(_ lines: [ReferenceLineCandidate]) -> Bool {
+        let numericPattern = #"^\[?\d+[\].]"#
+        let count = lines.prefix(12).filter {
+            $0.text.range(of: numericPattern, options: .regularExpression) != nil
+        }.count
+        return count >= 2
+    }
+
     private func collectReferenceEntry(
         startingAt startIndex: Int,
         from lines: [ReferenceLineCandidate]
     ) -> String {
         guard lines.indices.contains(startIndex) else { return "" }
+
+        // In a numeric reference list ([1], [2], …) the continuation lines after
+        // the opening bracket often start with author names which NLTagger would
+        // incorrectly flag as new entries.  Restrict entry-boundary detection to
+        // numeric markers only in that case.
+        let numericStyle = isNumericReferenceList(lines)
+
         var collected = [lines[startIndex].text]
         var nextIndex = startIndex + 1
 
         while nextIndex < lines.count {
             let nextLine = lines[nextIndex].text
-            if looksLikeNewReferenceEntry(nextLine) {
-                break
+            let isNewEntry: Bool
+            if numericStyle {
+                isNewEntry = nextLine.range(of: #"^\[?\d+[\].]"#, options: .regularExpression) != nil
+            } else {
+                isNewEntry = looksLikeNewReferenceEntry(nextLine)
             }
-            if collected.last == nextLine {
-                break
-            }
+            if isNewEntry { break }
+            if collected.last == nextLine { break }
             collected.append(nextLine)
             nextIndex += 1
         }
