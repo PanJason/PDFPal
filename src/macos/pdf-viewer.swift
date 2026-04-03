@@ -4041,6 +4041,25 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             return ("", "")
         }
 
+        guard let currentRange = referenceLineRange(for: lineSelection, on: page) else {
+            let lineBounds = lineSelection.bounds(for: page).insetBy(dx: -2, dy: -1)
+            let leftRect = CGRect(
+                x: lineBounds.minX,
+                y: lineBounds.minY,
+                width: max(0, bounds.minX - lineBounds.minX),
+                height: lineBounds.height
+            )
+            let rightRect = CGRect(
+                x: bounds.maxX,
+                y: lineBounds.minY,
+                width: max(0, lineBounds.maxX - bounds.maxX),
+                height: lineBounds.height
+            )
+            let leftText = cleanCitationText(page.selection(for: leftRect)?.string ?? "")
+            let rightText = cleanCitationText(page.selection(for: rightRect)?.string ?? "")
+            return (leftText, rightText)
+        }
+
         let lineBounds = lineSelection.bounds(for: page).insetBy(dx: -2, dy: -1)
         let leftRect = CGRect(
             x: lineBounds.minX,
@@ -4055,8 +4074,25 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             height: lineBounds.height
         )
 
-        let leftText = cleanCitationText(page.selection(for: leftRect)?.string ?? "")
-        let rightText = cleanCitationText(page.selection(for: rightRect)?.string ?? "")
+        let currentLeftText = cleanCitationText(page.selection(for: leftRect)?.string ?? "")
+        let currentRightText = cleanCitationText(page.selection(for: rightRect)?.string ?? "")
+
+        let pageString = page.string ?? ""
+        let previousText = citationAdjacentLineText(
+            from: previousNonWhitespaceCharacterIndex(in: pageString, before: currentRange.location),
+            currentRange: currentRange,
+            currentBounds: lineBounds,
+            on: page
+        )
+        let nextText = citationAdjacentLineText(
+            from: nextNonWhitespaceCharacterIndex(in: pageString, from: NSMaxRange(currentRange)),
+            currentRange: currentRange,
+            currentBounds: lineBounds,
+            on: page
+        )
+
+        let leftText = joinCitationContextParts([previousText, currentLeftText])
+        let rightText = joinCitationContextParts([currentRightText, nextText])
         return (leftText, rightText)
     }
 
@@ -4108,7 +4144,16 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
                 }
                 return result
             }
-            // Try 3: Combined NLTagger + regex for the left context.
+            // Try 3: trailing multi-author surname list →
+            // "Gu, Goel, and Re" or "Smith, Jones, Brown"
+            if let authorPart = trailingMultiAuthorCitationPrefix(from: leftContext) {
+                let result = cleanCitationText("\(authorPart) \(fragmentTrimmed)")
+                if Self.citationDebugLoggingEnabled {
+                    Swift.print("[citation-debug]   Try3 trailingMultiAuthorPrefix → \(result)")
+                }
+                return result
+            }
+            // Try 4: Combined NLTagger + regex for the left context.
             // NLTagger can miss non-Western names (e.g. "Kacham"), so we also
             // extract the first capitalized word from the left context as a
             // candidate first-author name.  If NLTagger's first name appears
@@ -4119,8 +4164,8 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
                 #"([A-Z][A-Za-z\u00C0-\u024F''\-]{2,})"#, in: leftContext
             ).flatMap { $0.count > 1 ? $0[1] : nil }
             if Self.citationDebugLoggingEnabled {
-                Swift.print("[citation-debug]   Try3 NLTagger names from leftContext: \(nlNames)")
-                Swift.print("[citation-debug]   Try3 firstCapWord from leftContext: \(firstCapWord ?? "nil")")
+                Swift.print("[citation-debug]   Try4 NLTagger names from leftContext: \(nlNames)")
+                Swift.print("[citation-debug]   Try4 firstCapWord from leftContext: \(firstCapWord ?? "nil")")
             }
             if !nlNames.isEmpty || firstCapWord != nil {
                 let chosenName: String
@@ -4155,18 +4200,18 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
                 }
                 if !chosenName.isEmpty {
                     if Self.citationDebugLoggingEnabled {
-                        Swift.print("[citation-debug]   Try3 chosen → \(chosenName) \(fragmentTrimmed)")
+                        Swift.print("[citation-debug]   Try4 chosen → \(chosenName) \(fragmentTrimmed)")
                     }
                     return "\(chosenName) \(fragmentTrimmed)"
                 }
             }
-            // Try 4: Last resort — grab the last capitalized word immediately
+            // Try 5: Last resort — grab the last capitalized word immediately
             // before the year link (closest name token to the citation anchor).
             if let match = citationRegexMatch(
                 #"([A-Z][A-Za-z\u00C0-\u024F''\-]{2,})\s*$"#, in: leftContext
             ), match.count > 1 {
                 if Self.citationDebugLoggingEnabled {
-                    Swift.print("[citation-debug]   Try4 regex fallback → \(match[1]) \(fragmentTrimmed)")
+                    Swift.print("[citation-debug]   Try5 regex fallback → \(match[1]) \(fragmentTrimmed)")
                 }
                 return "\(match[1]) \(fragmentTrimmed)"
             }
@@ -4202,6 +4247,26 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         for pattern in patterns {
             if let match = citationRegexMatch(pattern, in: leftContext), match.count > 1 {
                 return cleanCitationText(match[1])
+            }
+        }
+        return nil
+    }
+
+    private func trailingMultiAuthorCitationPrefix(from leftContext: String) -> String? {
+        let nameToken = #"[A-Z][A-Za-z\u00C0-\u024F'’.\-]*"#
+        let authorFragment = "\(nameToken)(?:\\s+\(nameToken))*"
+        let patterns = [
+            "((?:\(authorFragment),\\s*)+(?:and\\s+\(authorFragment)|\(authorFragment))\\s*)$",
+            "((?:\(authorFragment)\\s+and\\s+)+(?:\(authorFragment))\\s*)$"
+        ]
+
+        for pattern in patterns {
+            if let match = citationRegexMatch(pattern, in: leftContext), match.count > 1 {
+                let candidate = cleanCitationText(match[1])
+                let hints = extractCitationAuthorHints(from: candidate)
+                if hints.count >= 2 {
+                    return candidate
+                }
             }
         }
         return nil
@@ -4759,24 +4824,54 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             return -3
         }
 
-        var score = 0
-        for (index, expected) in fingerprint.authorHints.prefix(4).enumerated() {
+        let expectedHints = Array(fingerprint.authorHints.prefix(4))
+        let maxOffset = max(0, min(3, candidateAuthors.count - 1))
+        var bestScore = Int.min
+
+        for offset in 0...maxOffset {
+            let alignmentScore = referenceEntryAuthorAlignmentScore(
+                expectedHints,
+                candidates: candidateAuthors,
+                startOffset: offset
+            )
+            bestScore = max(bestScore, alignmentScore)
+        }
+
+        return bestScore
+    }
+
+    private func referenceEntryAuthorAlignmentScore(
+        _ expectedHints: [CitationAuthorHint],
+        candidates: [CitationAuthorHint],
+        startOffset: Int
+    ) -> Int {
+        guard !expectedHints.isEmpty else { return 0 }
+
+        var score = -2 * startOffset
+        var matchedCount = 0
+
+        for (index, expected) in expectedHints.enumerated() {
             let weight = max(1, 4 - index)
-            guard candidateAuthors.indices.contains(index) else {
+            let candidateIndex = startOffset + index
+            guard candidates.indices.contains(candidateIndex) else {
                 score -= 2 * weight
                 continue
             }
 
-            let candidate = candidateAuthors[index]
+            let candidate = candidates[candidateIndex]
             guard candidate.surname == expected.surname else {
                 score -= 5 * weight
                 break
             }
 
+            matchedCount += 1
             score += 4 * weight
             score += initialsMatchScore(expected: expected.initials, candidate: candidate.initials) * weight
         }
 
+        // Prefer alignments that match more consecutive authors even if they
+        // start slightly later in the candidate list.
+        score += matchedCount * 2
         return score
     }
 
@@ -4926,6 +5021,92 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             index += 1
         }
         return index
+    }
+
+    private func previousNonWhitespaceCharacterIndex(in text: String, before start: Int) -> Int? {
+        guard start > 0 else { return nil }
+        let characters = Array(text)
+        var index = min(start - 1, characters.count - 1)
+        while index >= 0 {
+            if !characters[index].isWhitespace && characters[index] != "\n" && characters[index] != "\r" {
+                return index
+            }
+            if index == 0 { break }
+            index -= 1
+        }
+        return nil
+    }
+
+    private func citationAdjacentLineText(
+        from characterIndex: Int?,
+        currentRange: NSRange,
+        currentBounds: CGRect,
+        on page: PDFPage
+    ) -> String {
+        guard let characterIndex,
+              let selection = lineSelection(atCharacterIndex: characterIndex, on: page),
+              let range = referenceLineRange(for: selection, on: page)
+        else {
+            return ""
+        }
+
+        guard range.location != currentRange.location || range.length != currentRange.length else {
+            return ""
+        }
+
+        let candidateBounds = selection.bounds(for: page).insetBy(dx: -2, dy: -1)
+        guard citationContextLinesAreAdjacent(candidateBounds, currentBounds, on: page) else {
+            return ""
+        }
+
+        return cleanCitationText(selection.string ?? "")
+    }
+
+    private func citationContextLinesAreAdjacent(
+        _ lhs: CGRect,
+        _ rhs: CGRect,
+        on page: PDFPage
+    ) -> Bool {
+        let metrics = typographyMetrics(for: page)
+        let verticalDistance = abs(lhs.midY - rhs.midY)
+        guard verticalDistance <= metrics.lineSpacing * 1.8 else { return false }
+
+        let horizontalOverlap = min(lhs.maxX, rhs.maxX) - max(lhs.minX, rhs.minX)
+        if horizontalOverlap > metrics.emWidth * 2 {
+            return true
+        }
+
+        let minXDistance = abs(lhs.minX - rhs.minX)
+        return minXDistance <= metrics.emWidth * 12
+    }
+
+    private func joinCitationContextParts(_ parts: [String]) -> String {
+        let nonEmpty = parts
+            .map(cleanCitationText)
+            .filter { !$0.isEmpty }
+        guard var result = nonEmpty.first else { return "" }
+
+        for part in nonEmpty.dropFirst() {
+            if shouldJoinCitationPartsWithoutSpace(result, next: part) {
+                result.removeLast()
+                result += part
+            } else {
+                result += " " + part
+            }
+        }
+
+        return cleanCitationText(result)
+    }
+
+    private func shouldJoinCitationPartsWithoutSpace(_ current: String, next: String) -> Bool {
+        guard let last = current.last,
+              last == "-" || last == "\u{2010}" || last == "\u{2011}"
+        else {
+            return false
+        }
+
+        guard let nextScalar = next.unicodeScalars.first else { return false }
+        return CharacterSet.lowercaseLetters.contains(nextScalar)
     }
 
     private func looksLikeNewReferenceEntry(_ text: String) -> Bool {
