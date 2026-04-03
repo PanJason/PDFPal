@@ -4243,6 +4243,29 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         return collected.joined(separator: " ")
     }
 
+    /// Extracts personal-name tokens from `text` using NLTagger, returning the
+    /// last-name component of each entity in the order they appear.
+    private func extractPersonLastNames(from text: String) -> [String] {
+        let tagger = NLTagger(tagSchemes: [.nameType])
+        tagger.string = text
+        var names: [String] = []
+        tagger.enumerateTags(
+            in: text.startIndex..<text.endIndex,
+            unit: .word,
+            scheme: .nameType,
+            options: [.omitWhitespace, .joinNames]
+        ) { tag, range in
+            if tag == .personalName {
+                let full = String(text[range])
+                // Use the last space-separated token as the last name.
+                let lastName = full.components(separatedBy: " ").last ?? full
+                if !lastName.isEmpty { names.append(lastName) }
+            }
+            return true
+        }
+        return names
+    }
+
     private func citationLabelFingerprint(from labelText: String) -> CitationLabelFingerprint {
         let cleaned = cleanCitationText(labelText)
 
@@ -4251,18 +4274,23 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             in: cleaned
         )?.dropFirst().first.map { String($0) }
 
-        let authorPatterns = [
-            #"([A-Z][A-Za-z'’\-]+)\s+et al\."#,
-            #"([A-Z][A-Za-z'’\-]+)\s+and\s+[A-Z][A-Za-z'’\-]+"#,
-            #"([A-Z][A-Za-z'’\-]+),"#
-        ]
+        // Use NLTagger to find personal names in document order; take the first
+        // (i.e. the first-listed author’s last name) as the fingerprint token.
+        // Fall back to the old regex cascade only when NLTagger finds nothing —
+        // this handles edge cases such as bracket-style labels "[Graves14]".
+        var authorToken = extractPersonLastNames(from: cleaned).first?.lowercased()
 
-        var authorToken: String?
-        for pattern in authorPatterns {
-            if let match = citationRegexMatch(pattern, in: cleaned),
-               match.count > 1 {
-                authorToken = match[1].lowercased()
-                break
+        if authorToken == nil {
+            let authorPatterns = [
+                #"([A-Z][A-Za-z’’\-]+)\s+et al\."#,
+                #"([A-Z][A-Za-z’’\-]+),"#,
+                #"([A-Z][A-Za-z’’\-]+)\s+and\s+[A-Z][A-Za-z’’\-]+"#,
+            ]
+            for pattern in authorPatterns {
+                if let match = citationRegexMatch(pattern, in: cleaned), match.count > 1 {
+                    authorToken = match[1].lowercased()
+                    break
+                }
             }
         }
 
