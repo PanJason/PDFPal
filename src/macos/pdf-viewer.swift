@@ -1094,6 +1094,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private var noteEditorTextEndObserver: NSObjectProtocol?
     private var pendingSaveAfterNoteEditorCloses = false
     private var pageTypographyCache: [ObjectIdentifier: PageTypographyMetrics] = [:]
+    private var pageColumnLayoutCache: [ObjectIdentifier: ColumnLayout] = [:]
     private let noteEditorNormalizationFollowUpDelay: TimeInterval = 0.04
     private let noteEditorCloseFallbackDelay: TimeInterval = 0.08
 
@@ -2100,6 +2101,17 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private struct ReferenceLineCandidate {
         let text: String
         let range: NSRange
+    }
+
+    /// Detected column layout for a single PDF page.
+    private struct ColumnLayout {
+        /// X-ranges (in page coordinates) of each detected text column.
+        let columns: [ClosedRange<CGFloat>]
+
+        /// Returns the column range that contains `x`, or the full-page range as fallback.
+        func column(containing x: CGFloat) -> ClosedRange<CGFloat> {
+            columns.first { $0.contains(x) } ?? (columns.first ?? x...x)
+        }
     }
 
     /// Measured typographic properties for a single PDF page.
@@ -3799,6 +3811,60 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             : sorted[mid]
     }
 
+    /// Infers the column layout of `page` by analysing the x-start distribution of
+    /// its text lines.  A large gap in that distribution (> 15 % of page width)
+    /// signals a column boundary.  Result is cached per page.
+    private func columnLayout(for page: PDFPage) -> ColumnLayout {
+        let key = ObjectIdentifier(page)
+        if let cached = pageColumnLayoutCache[key] { return cached }
+
+        let pageBounds = page.bounds(for: .cropBox)
+        let fullRange = pageBounds.minX...pageBounds.maxX
+
+        guard let selection = page.selection(for: pageBounds) else {
+            let layout = ColumnLayout(columns: [fullRange])
+            pageColumnLayoutCache[key] = layout
+            return layout
+        }
+
+        // Collect the left edge of every substantial line (width > 10 % of page).
+        let minLineWidth = pageBounds.width * 0.1
+        let xStarts: [CGFloat] = selection
+            .selectionsByLine()
+            .filter { $0.pages.first === page }
+            .compactMap { line -> CGFloat? in
+                let b = line.bounds(for: page)
+                return b.width > minLineWidth ? b.minX : nil
+            }
+            .sorted()
+
+        guard xStarts.count >= 6 else {
+            let layout = ColumnLayout(columns: [fullRange])
+            pageColumnLayoutCache[key] = layout
+            return layout
+        }
+
+        // Find consecutive x-start pairs whose gap exceeds 15 % of page width.
+        let gapThreshold = pageBounds.width * 0.15
+        var splitPoints: [CGFloat] = []
+        for (a, b) in zip(xStarts, xStarts.dropFirst()) {
+            if b - a > gapThreshold {
+                splitPoints.append((a + b) / 2)
+            }
+        }
+
+        let layout: ColumnLayout
+        if splitPoints.isEmpty {
+            layout = ColumnLayout(columns: [fullRange])
+        } else {
+            let boundaries = [pageBounds.minX] + splitPoints + [pageBounds.maxX]
+            let columns = zip(boundaries, boundaries.dropFirst()).map { lo, hi in lo...hi }
+            layout = ColumnLayout(columns: columns)
+        }
+        pageColumnLayoutCache[key] = layout
+        return layout
+    }
+
     private func citationAnnotationsAreAdjacent(
         _ lhs: PDFAnnotation,
         _ rhs: PDFAnnotation,
@@ -4106,10 +4172,13 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let anchorY = point?.y ?? pageBounds.midY
         // Scan ±6 lines worth of space, derived from actual page typography.
         let halfHeight = typographyMetrics(for: page).lineSpacing * 6
+        // Restrict the scan to the column that contains the destination point so
+        // that references from adjacent columns in multi-column layouts are excluded.
+        let col = columnLayout(for: page).column(containing: point?.x ?? pageBounds.midX)
         let scanRect = CGRect(
-            x: pageBounds.minX,
+            x: col.lowerBound,
             y: max(pageBounds.minY, anchorY - halfHeight),
-            width: pageBounds.width,
+            width: col.upperBound - col.lowerBound,
             height: min(pageBounds.height, halfHeight * 2)
         )
 
