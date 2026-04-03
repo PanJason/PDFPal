@@ -2101,6 +2101,8 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private struct ReferenceLineCandidate {
         let text: String
         let range: NSRange
+        /// Visual bounding box on the page (page-coordinate points).
+        let bounds: CGRect
     }
 
     /// Detected column layout for a single PDF page.
@@ -4276,14 +4278,34 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
                 }
                 let text = cleanCitationText(lineSelection.string ?? "")
                 guard !text.isEmpty else { return nil }
-                return ReferenceLineCandidate(text: text, range: range)
+                let lineBounds = lineSelection.bounds(for: page)
+                return ReferenceLineCandidate(text: text, range: range, bounds: lineBounds)
             }
 
-        let sorted = lines.sorted { lhs, rhs in lhs.range.location < rhs.range.location }
+        // Sort by visual position (top-to-bottom, left-to-right) rather than
+        // character index.  Character-index ordering breaks for hanging-indent
+        // reference lists where bracket labels (e.g. "[52]" at x≈72) are
+        // separate PDFKit lines from their body text (at x≈100+) — the brackets
+        // all cluster first by character index, followed by all body-text lines.
+        let m = typographyMetrics(for: page)
+        let sorted = lines.sorted { lhs, rhs in
+            // Lines within 30 % of a line height are treated as the same row.
+            let dy = lhs.bounds.midY - rhs.bounds.midY
+            if abs(dy) > m.lineHeight * 0.3 {
+                return dy > 0  // higher Y = earlier (PDF: Y grows upward)
+            }
+            let dx = lhs.bounds.minX - rhs.bounds.minX
+            if abs(dx) > 1 {
+                return dx < 0  // smaller X = earlier
+            }
+            return lhs.range.location < rhs.range.location
+        }
 
         if Self.citationDebugLoggingEnabled {
             let style = isNumericReferenceList(sorted) ? "numeric" : "author-year"
-            let preview = sorted.prefix(6).map { "    \($0.text.prefix(60))" }.joined(separator: "\n")
+            let preview = sorted.prefix(8).map {
+                "    y=\(Int($0.bounds.midY)) x=\(Int($0.bounds.minX)) \($0.text.prefix(55))"
+            }.joined(separator: "\n")
             Swift.print("""
             [citation-debug] referenceLines style=\(style) count=\(sorted.count)
             \(preview)
