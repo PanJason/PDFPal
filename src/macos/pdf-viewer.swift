@@ -4053,29 +4053,79 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let currentTrimmed = cleanCitationText(current)
         let fragmentTrimmed = cleanCitationText(primaryFragment)
 
+        if Self.citationDebugLoggingEnabled {
+            Swift.print("""
+            [citation-debug] inferCitationLabel:
+                current="\(currentTrimmed)" fragment="\(fragmentTrimmed)"
+                leftContext="\(leftContext.suffix(80))"
+                rightContext="\(rightContext.prefix(80))"
+            """)
+        }
+
         if fragmentTrimmed.range(of: #"^[a-z]$"#, options: .regularExpression) != nil,
            let inherited = inheritedAuthorYearPrefix(from: leftContext) {
-            return "\(inherited.authorPart)\(inherited.year)\(fragmentTrimmed)"
+            let result = "\(inherited.authorPart)\(inherited.year)\(fragmentTrimmed)"
+            if Self.citationDebugLoggingEnabled {
+                Swift.print("[citation-debug] inferCitationLabel → suffix-letter: \(result)")
+            }
+            return result
         }
 
         if fragmentTrimmed.range(of: #"^(19|20)\d{2}[a-z]?$"#, options: .regularExpression) != nil {
+            if Self.citationDebugLoggingEnabled {
+                Swift.print("[citation-debug] inferCitationLabel: bare year path for \(fragmentTrimmed)")
+            }
             // Try 1: left context already contains a prior year → "Smith 2019, Jones 2020"
             if let authorPart = inheritedAuthorYearPrefix(from: leftContext)?.authorPart {
-                return cleanCitationText("\(authorPart)\(fragmentTrimmed)")
+                let result = cleanCitationText("\(authorPart)\(fragmentTrimmed)")
+                if Self.citationDebugLoggingEnabled {
+                    Swift.print("[citation-debug]   Try1 inheritedAuthorYear → \(result)")
+                }
+                return result
             }
             // Try 2: left context ends with "et al." or a trailing comma →
             // "Vaswani et al." or "Smith," (common when only the year is hyperlinked)
             if let authorPart = trailingAuthorCitationPrefix(from: leftContext) {
-                return cleanCitationText("\(authorPart) \(fragmentTrimmed)")
+                let result = cleanCitationText("\(authorPart) \(fragmentTrimmed)")
+                if Self.citationDebugLoggingEnabled {
+                    Swift.print("[citation-debug]   Try2 trailingAuthorPrefix → \(result)")
+                }
+                return result
             }
-            // Try 3: NLTagger on the left context.
-            // Strategy: use the FIRST found name unless a year appears between the
-            // first and last name (which signals multiple consecutive citations, e.g.
-            // "Graves 2014, Wayne 2016, and Smith"), in which case use the LAST name.
+            // Try 3: Combined NLTagger + regex for the left context.
+            // NLTagger can miss non-Western names (e.g. "Kacham"), so we also
+            // extract the first capitalized word from the left context as a
+            // candidate first-author name.  If NLTagger's first name appears
+            // later in the context than the regex first word, the regex word is
+            // probably the true first author that NLTagger skipped.
             let nlNames = extractPersonLastNames(from: leftContext)
-            if !nlNames.isEmpty {
+            let firstCapWord = citationRegexMatch(
+                #"([A-Z][A-Za-z\u00C0-\u024F''\-]{2,})"#, in: leftContext
+            ).flatMap { $0.count > 1 ? $0[1] : nil }
+            if Self.citationDebugLoggingEnabled {
+                Swift.print("[citation-debug]   Try3 NLTagger names from leftContext: \(nlNames)")
+                Swift.print("[citation-debug]   Try3 firstCapWord from leftContext: \(firstCapWord ?? "nil")")
+            }
+            if !nlNames.isEmpty || firstCapWord != nil {
                 let chosenName: String
-                if nlNames.count >= 2,
+                if nlNames.isEmpty, let fcw = firstCapWord {
+                    // NLTagger found nothing, use the first capitalized word
+                    chosenName = fcw
+                } else if let fcw = firstCapWord,
+                          !nlNames.isEmpty,
+                          fcw != nlNames[0],
+                          let fcwRange = leftContext.range(of: fcw),
+                          let nlRange = leftContext.range(of: nlNames[0]),
+                          fcwRange.lowerBound < nlRange.lowerBound {
+                    // The first cap word appears before NLTagger's first name →
+                    // NLTagger missed the true first author (e.g. "Kacham" before
+                    // "Mirrokni"), so prefer the earlier regex match.
+                    let between = String(leftContext[fcwRange.upperBound..<nlRange.lowerBound])
+                    let hasPriorYear = between.range(
+                        of: #"(19|20)\d{2}"#, options: .regularExpression
+                    ) != nil
+                    chosenName = hasPriorYear ? nlNames[0] : fcw
+                } else if nlNames.count >= 2,
                    let firstRange = leftContext.range(of: nlNames[0]),
                    let lastRange  = leftContext.range(of: nlNames[nlNames.count - 1]),
                    firstRange.upperBound < lastRange.lowerBound {
@@ -4085,17 +4135,27 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
                     ) != nil
                     chosenName = hasPriorYear ? nlNames[nlNames.count - 1] : nlNames[0]
                 } else {
-                    chosenName = nlNames[0]
+                    chosenName = nlNames.first ?? firstCapWord ?? ""
                 }
-                return "\(chosenName) \(fragmentTrimmed)"
+                if !chosenName.isEmpty {
+                    if Self.citationDebugLoggingEnabled {
+                        Swift.print("[citation-debug]   Try3 chosen → \(chosenName) \(fragmentTrimmed)")
+                    }
+                    return "\(chosenName) \(fragmentTrimmed)"
+                }
             }
-            // Try 4: NLTagger found nothing (e.g. non-ASCII / umlaut names).
-            // Grab the last capitalized word token immediately before the year link;
-            // this is the closest author name to the citation anchor.
+            // Try 4: Last resort — grab the last capitalized word immediately
+            // before the year link (closest name token to the citation anchor).
             if let match = citationRegexMatch(
                 #"([A-Z][A-Za-z\u00C0-\u024F''\-]{2,})\s*$"#, in: leftContext
             ), match.count > 1 {
+                if Self.citationDebugLoggingEnabled {
+                    Swift.print("[citation-debug]   Try4 regex fallback → \(match[1]) \(fragmentTrimmed)")
+                }
                 return "\(match[1]) \(fragmentTrimmed)"
+            }
+            if Self.citationDebugLoggingEnabled {
+                Swift.print("[citation-debug]   bare year: all tries failed")
             }
         }
 
@@ -4303,7 +4363,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
 
         if Self.citationDebugLoggingEnabled {
             let style = isNumericReferenceList(sorted) ? "numeric" : "author-year"
-            let preview = sorted.prefix(8).map {
+            let preview = sorted.map {
                 "    y=\(Int($0.bounds.midY)) x=\(Int($0.bounds.minX)) \($0.text.prefix(55))"
             }.joined(separator: "\n")
             Swift.print("""
@@ -4385,7 +4445,20 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private func deriveLabelFromReference(_ referenceText: String) -> String? {
         guard !referenceText.isEmpty else { return nil }
 
-        let lastNames = extractPersonLastNames(from: referenceText)
+        var lastNames = extractPersonLastNames(from: referenceText)
+
+        // Fallback: when NLTagger finds few/no names, parse the author block with
+        // regex.  Academic references typically start with the author list followed
+        // by a year: "FirstName LastName, FirstName LastName, and FirstName LastName.
+        // YYYY."  We extract the author portion (everything before the first 4-digit
+        // year) and pull last-name tokens from "Firstname Lastname" pairs.
+        if lastNames.count <= 1 {
+            let regexNames = extractAuthorLastNamesRegex(from: referenceText)
+            if regexNames.count > lastNames.count {
+                lastNames = regexNames
+            }
+        }
+
         let year = citationRegexMatch(#"((?:19|20)\d{2})[^0-9]"#, in: referenceText)?
             .dropFirst().first.map { String($0) } ?? ""
 
@@ -4401,7 +4474,60 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         }
 
         let label = (authorPart + year).trimmingCharacters(in: .whitespaces)
+        if Self.citationDebugLoggingEnabled {
+            Swift.print("[citation-debug] deriveLabelFromReference: names=\(lastNames) year=\(year) → \"\(label)\"")
+            Swift.print("[citation-debug]   refText: \(referenceText.prefix(120))")
+        }
         return label.isEmpty ? nil : label
+    }
+
+    /// Regex-based fallback for extracting author last names from a bibliography
+    /// entry.  Handles the common "First Last, First Last, and First Last. YYYY."
+    /// pattern used in most academic references.
+    private func extractAuthorLastNamesRegex(from referenceText: String) -> [String] {
+        // Strip any leading bracketed number, e.g. "[54]"
+        let stripped = referenceText.replacingOccurrences(
+            of: #"^\s*\[?\d{1,3}[\].]\s*"#, with: "", options: .regularExpression
+        )
+
+        // Extract the author block: everything before the first 4-digit year.
+        guard let yearRange = stripped.range(of: #"(?:19|20)\d{2}"#, options: .regularExpression) else {
+            return []
+        }
+        let authorBlock = String(stripped[stripped.startIndex..<yearRange.lowerBound])
+
+        // Split on commas and "and" to get individual author fragments.
+        let separators = try? NSRegularExpression(pattern: #"\s*,\s*(?:and\s+)?|\s+and\s+"#)
+        let nsBlock = authorBlock as NSString
+        let parts = separators?.matches(in: authorBlock, range: NSRange(location: 0, length: nsBlock.length)) ?? []
+
+        var ranges: [NSRange] = []
+        var start = 0
+        for match in parts {
+            ranges.append(NSRange(location: start, length: match.range.location - start))
+            start = NSMaxRange(match.range)
+        }
+        ranges.append(NSRange(location: start, length: nsBlock.length - start))
+
+        // From each fragment like "Praneeth Kacham" or "V. Mirrokni", extract the
+        // last space-separated token as the last name (if it starts uppercase).
+        let namePattern = #"[A-Z][A-Za-z\u00C0-\u024F''\-]{1,}"#
+        var lastNames: [String] = []
+        for range in ranges {
+            let fragment = nsBlock.substring(with: range)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: ".", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fragment.isEmpty else { continue }
+            let tokens = fragment.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            // Last name is typically the last token; skip single-initial tokens.
+            if let lastName = tokens.last,
+               lastName.range(of: namePattern, options: .regularExpression) != nil,
+               lastName.count >= 2 {
+                lastNames.append(lastName)
+            }
+        }
+        return lastNames
     }
 
     /// Extracts personal-name tokens from `text` using NLTagger, returning the
@@ -4453,6 +4579,10 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
                     break
                 }
             }
+        }
+
+        if Self.citationDebugLoggingEnabled {
+            Swift.print("[citation-debug] citationLabelFingerprint(\"\(cleaned)\") → author=\(authorToken ?? "nil"), year=\(yearToken ?? "nil")")
         }
 
         return CitationLabelFingerprint(
