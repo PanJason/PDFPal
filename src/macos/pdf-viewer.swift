@@ -1,4 +1,5 @@
 import AppKit
+import NaturalLanguage
 import PDFKit
 import SwiftUI
 
@@ -1092,6 +1093,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private var noteEditorTextChangeObserver: NSObjectProtocol?
     private var noteEditorTextEndObserver: NSObjectProtocol?
     private var pendingSaveAfterNoteEditorCloses = false
+    private var pageTypographyCache: [ObjectIdentifier: PageTypographyMetrics] = [:]
     private let noteEditorNormalizationFollowUpDelay: TimeInterval = 0.04
     private let noteEditorCloseFallbackDelay: TimeInterval = 0.08
 
@@ -2098,6 +2100,17 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private struct ReferenceLineCandidate {
         let text: String
         let range: NSRange
+    }
+
+    /// Measured typographic properties for a single PDF page.
+    /// All values are in PDF page-coordinate points.
+    private struct PageTypographyMetrics {
+        /// Median bounding-box height of body-text lines.
+        let lineHeight: CGFloat
+        /// Median centre-to-centre distance between consecutive lines.
+        let lineSpacing: CGFloat
+        /// Median advance width per character (≈ 1 em for the body font).
+        let emWidth: CGFloat
     }
 
     private func contextMarkupNoteTarget() -> MarkupNoteTarget? {
@@ -3725,19 +3738,86 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         return cluster
     }
 
+    /// Returns measured typographic metrics for `page`, computing and caching on first access.
+    /// Samples the middle 60 % of the page to avoid headers and footers skewing the result.
+    private func typographyMetrics(for page: PDFPage) -> PageTypographyMetrics {
+        let key = ObjectIdentifier(page)
+        if let cached = pageTypographyCache[key] { return cached }
+
+        let pageBounds = page.bounds(for: .cropBox)
+        // Sample a horizontal strip from 20 %–80 % of the page height.
+        let sampleRect = CGRect(
+            x: pageBounds.minX,
+            y: pageBounds.minY + pageBounds.height * 0.2,
+            width: pageBounds.width,
+            height: pageBounds.height * 0.6
+        )
+
+        let allLines = page.selection(for: sampleRect)?
+            .selectionsByLine()
+            .filter { $0.pages.first === page } ?? []
+
+        // Line height: median bounding-box height, ignoring near-zero lines.
+        let heights = allLines.compactMap { line -> CGFloat? in
+            let h = line.bounds(for: page).height
+            return h > 2 ? h : nil
+        }
+        let lineHeight = medianCGFloat(heights) ?? 10
+
+        // Line spacing: median |midY(n) – midY(n+1)| for consecutive lines.
+        let midYs = allLines.map { $0.bounds(for: page).midY }
+        let gaps = zip(midYs, midYs.dropFirst()).compactMap { (a, b) -> CGFloat? in
+            let g = abs(a - b)
+            // Ignore gaps that look like blank-line separators (> 3 × line height).
+            return (g > 2 && g < lineHeight * 3) ? g : nil
+        }
+        let lineSpacing = medianCGFloat(gaps) ?? lineHeight * 1.2
+
+        // em-width: median (lineWidth / charCount) for lines with 20–80 characters.
+        let emWidths = allLines.compactMap { line -> CGFloat? in
+            guard let s = line.string, s.count >= 20, s.count <= 80 else { return nil }
+            let w = line.bounds(for: page).width
+            return w > 0 ? w / CGFloat(s.count) : nil
+        }
+        let emWidth = medianCGFloat(emWidths) ?? 6
+
+        let metrics = PageTypographyMetrics(
+            lineHeight: lineHeight,
+            lineSpacing: lineSpacing,
+            emWidth: emWidth
+        )
+        pageTypographyCache[key] = metrics
+        return metrics
+    }
+
+    private func medianCGFloat(_ values: [CGFloat]) -> CGFloat? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        return sorted.count.isMultiple(of: 2)
+            ? (sorted[mid - 1] + sorted[mid]) / 2
+            : sorted[mid]
+    }
+
     private func citationAnnotationsAreAdjacent(
         _ lhs: PDFAnnotation,
         _ rhs: PDFAnnotation,
         on page: PDFPage
     ) -> Bool {
+        let m = typographyMetrics(for: page)
+
         let verticalGap = abs(lhs.bounds.midY - rhs.bounds.midY)
         let horizontalGap = rhs.bounds.minX - lhs.bounds.maxX
-        if verticalGap <= 4 && horizontalGap <= 18 {
+
+        // Same line: vertical wobble < 30 % of line height; gap < 3 em.
+        if verticalGap < m.lineHeight * 0.3, horizontalGap < m.emWidth * 3 {
             return true
         }
 
+        // Cross-line continuation: dropped between 30 % and 150 % of line spacing.
         let lineDrop = lhs.bounds.midY - rhs.bounds.midY
-        guard lineDrop > 4, lineDrop <= 26 else { return false }
+        guard lineDrop > m.lineHeight * 0.3,
+              lineDrop <= m.lineSpacing * 1.5 else { return false }
 
         let lhsText = cleanCitationText(citationLabelText(for: lhs, on: page))
         let rhsText = cleanCitationText(citationLabelText(for: rhs, on: page))
@@ -4024,11 +4104,13 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     ) -> [ReferenceLineCandidate] {
         let pageBounds = page.bounds(for: .cropBox)
         let anchorY = point?.y ?? pageBounds.midY
+        // Scan ±6 lines worth of space, derived from actual page typography.
+        let halfHeight = typographyMetrics(for: page).lineSpacing * 6
         let scanRect = CGRect(
             x: pageBounds.minX,
-            y: max(pageBounds.minY, anchorY - 120),
+            y: max(pageBounds.minY, anchorY - halfHeight),
             width: pageBounds.width,
-            height: min(pageBounds.height, 240)
+            height: min(pageBounds.height, halfHeight * 2)
         )
 
         guard let selection = page.selection(for: scanRect) else { return [] }
