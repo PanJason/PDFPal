@@ -4292,7 +4292,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     /// Returns true when `lines` look like a numeric reference list (i.e. "[1]", "1.", …).
     /// At least two of the first twelve candidates must carry a numeric marker.
     private func isNumericReferenceList(_ lines: [ReferenceLineCandidate]) -> Bool {
-        let numericPattern = #"^\[?\d+[\].]"#
+        let numericPattern = #"^\[?\d{1,3}[\].]"#
         let count = lines.prefix(12).filter {
             $0.text.range(of: numericPattern, options: .regularExpression) != nil
         }.count
@@ -4318,7 +4318,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             let nextLine = lines[nextIndex].text
             let isNewEntry: Bool
             if numericStyle {
-                isNewEntry = nextLine.range(of: #"^\[?\d+[\].]"#, options: .regularExpression) != nil
+                isNewEntry = nextLine.range(of: #"^\[?\d{1,3}[\].]"#, options: .regularExpression) != nil
             } else {
                 isNewEntry = looksLikeNewReferenceEntry(nextLine)
             }
@@ -4527,7 +4527,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         guard !trimmed.isEmpty else { return false }
 
         // Numeric / bracketed list markers: [1], 1., etc.
-        if trimmed.range(of: #"^\[?\d+[\].]"#, options: .regularExpression) != nil {
+        if trimmed.range(of: #"^\[?\d{1,3}[\].]"#, options: .regularExpression) != nil {
             return true
         }
 
