@@ -3983,7 +3983,16 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let combinedLabel = cleanCitationText(
             cluster.map { citationLabelText(for: $0, on: page) }.joined(separator: " ")
         )
-        if looksLikeCitationLabel(combinedLabel) {
+
+        // A bare year (e.g. "2017") is a valid citation label but carries no
+        // author information.  Many LaTeX styles only hyperlink the year token,
+        // leaving the author fragment outside the annotation bounds.  Always try
+        // to enrich a bare year with context from the surrounding source line.
+        let isBareYear = combinedLabel.range(
+            of: #"^(19|20)\d{2}[a-z]?$"#, options: .regularExpression
+        ) != nil
+
+        if looksLikeCitationLabel(combinedLabel) && !isBareYear {
             return combinedLabel
         }
 
@@ -4047,9 +4056,20 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             return "\(inherited.authorPart)\(inherited.year)\(fragmentTrimmed)"
         }
 
-        if fragmentTrimmed.range(of: #"^(19|20)\d{2}[a-z]?$"#, options: .regularExpression) != nil,
-           let authorPart = inheritedAuthorYearPrefix(from: leftContext)?.authorPart {
-            return cleanCitationText("\(authorPart)\(fragmentTrimmed)")
+        if fragmentTrimmed.range(of: #"^(19|20)\d{2}[a-z]?$"#, options: .regularExpression) != nil {
+            // Try 1: left context already contains a year → "Smith 2019, Jones 2020"
+            if let authorPart = inheritedAuthorYearPrefix(from: leftContext)?.authorPart {
+                return cleanCitationText("\(authorPart)\(fragmentTrimmed)")
+            }
+            // Try 2: left context ends with an author prefix but no year →
+            // "Vaswani et al." or "Smith," (the common case when only the year is linked)
+            if let authorPart = trailingAuthorCitationPrefix(from: leftContext) {
+                return cleanCitationText("\(authorPart) \(fragmentTrimmed)")
+            }
+            // Try 3: NLTagger on the left context — pick the name closest to the year.
+            if let lastName = extractPersonLastNames(from: leftContext).last {
+                return "\(lastName) \(fragmentTrimmed)"
+            }
         }
 
         if !looksLikeCitationLabel(currentTrimmed),
