@@ -2110,6 +2110,11 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let bounds: CGRect
     }
 
+    private struct ReferenceStartBand {
+        let centerX: CGFloat
+        let tolerance: CGFloat
+    }
+
     /// Detected column layout for a single PDF page.
     private struct ColumnLayout {
         /// X-ranges (in page coordinates) of each detected text column.
@@ -4369,7 +4374,8 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     ) -> [(entry: String, score: Int)] {
         guard !lines.isEmpty else { return [] }
         let fingerprint = citationLabelFingerprint(from: labelText)
-        return lines.indices.map { startIndex in
+        let startIndices = referenceEntryStartIndices(in: lines)
+        return startIndices.map { startIndex in
             let entry = collectReferenceEntry(startingAt: startIndex, from: lines)
             let score = referenceEntryScore(entry, fingerprint: fingerprint)
             return (entry: entry, score: score)
@@ -4465,7 +4471,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         var bestEntry: String?
         var bestScore = Int.min
 
-        for startIndex in lines.indices {
+        for startIndex in referenceEntryStartIndices(in: lines) {
             let entry = collectReferenceEntry(startingAt: startIndex, from: lines)
             let score = referenceEntryScore(entry, fingerprint: fingerprint)
             if score > bestScore {
@@ -4498,17 +4504,26 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         // incorrectly flag as new entries.  Restrict entry-boundary detection to
         // numeric markers only in that case.
         let numericStyle = isNumericReferenceList(lines)
+        let authorYearStartBand = numericStyle ? nil : authorYearReferenceStartBand(in: lines)
 
         var collected = [lines[startIndex].text]
         var nextIndex = startIndex + 1
 
         while nextIndex < lines.count {
-            let nextLine = lines[nextIndex].text
+            let currentCandidate = lines[nextIndex - 1]
+            let nextCandidate = lines[nextIndex]
+            let nextLine = nextCandidate.text
             let isNewEntry: Bool
             if numericStyle {
-                isNewEntry = nextLine.range(of: #"^\[?\d{1,3}[\].]"#, options: .regularExpression) != nil
+                isNewEntry = isNumericReferenceEntryStart(nextLine)
             } else {
-                isNewEntry = looksLikeNewReferenceEntry(nextLine)
+                isNewEntry = authorYearStartBand.map {
+                    shouldStartNewAuthorYearReferenceEntry(
+                        nextCandidate,
+                        after: currentCandidate,
+                        startBand: $0
+                    )
+                } ?? looksLikeNewReferenceEntry(nextLine)
             }
             if isNewEntry { break }
             if collected.last == nextLine { break }
@@ -4517,6 +4532,93 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         }
 
         return collected.joined(separator: " ")
+    }
+
+    private func referenceEntryStartIndices(in lines: [ReferenceLineCandidate]) -> [Int] {
+        guard !lines.isEmpty else { return [] }
+
+        if isNumericReferenceList(lines) {
+            let indices = lines.indices.filter { isNumericReferenceEntryStart(lines[$0].text) }
+            return indices.isEmpty ? Array(lines.indices) : indices
+        }
+
+        if let startBand = authorYearReferenceStartBand(in: lines) {
+            let indices = lines.indices.filter {
+                isAuthorYearReferenceEntryStart(lines[$0], startBand: startBand)
+            }
+            if !indices.isEmpty {
+                return indices
+            }
+        }
+
+        let fallback = lines.indices.filter { looksLikeNewReferenceEntry(lines[$0].text) }
+        return fallback.isEmpty ? Array(lines.indices) : fallback
+    }
+
+    private func isNumericReferenceEntryStart(_ text: String) -> Bool {
+        text.range(of: #"^\[?\d{1,3}[\].]"#, options: .regularExpression) != nil
+    }
+
+    private func authorYearReferenceStartBand(in lines: [ReferenceLineCandidate]) -> ReferenceStartBand? {
+        let candidateLines = lines.filter { !$0.text.isEmpty }
+        guard !candidateLines.isEmpty else { return nil }
+
+        let heights = candidateLines.compactMap { line -> CGFloat? in
+            let height = line.bounds.height
+            return height > 0 ? height : nil
+        }
+        let tolerance = max(2.5, (medianCGFloat(heights) ?? 10) * 0.25)
+
+        var bands: [(centerX: CGFloat, count: Int)] = []
+        for x in candidateLines.map(\.bounds.minX).sorted() {
+            if let lastIndex = bands.indices.last,
+               abs(x - bands[lastIndex].centerX) <= tolerance {
+                let current = bands[lastIndex]
+                let nextCount = current.count + 1
+                let nextCenter = (current.centerX * CGFloat(current.count) + x) / CGFloat(nextCount)
+                bands[lastIndex] = (centerX: nextCenter, count: nextCount)
+            } else {
+                bands.append((centerX: x, count: 1))
+            }
+        }
+
+        guard !bands.isEmpty else { return nil }
+        let chosen = bands.first(where: { $0.count >= 2 }) ?? bands[0]
+        return ReferenceStartBand(centerX: chosen.centerX, tolerance: tolerance)
+    }
+
+    private func isAuthorYearReferenceEntryStart(
+        _ line: ReferenceLineCandidate,
+        startBand: ReferenceStartBand
+    ) -> Bool {
+        guard isWithinReferenceStartBand(line, startBand: startBand) else { return false }
+        return looksLikeNewReferenceEntry(line.text)
+    }
+
+    private func shouldStartNewAuthorYearReferenceEntry(
+        _ candidate: ReferenceLineCandidate,
+        after previous: ReferenceLineCandidate,
+        startBand: ReferenceStartBand
+    ) -> Bool {
+        let candidateAtStart = isWithinReferenceStartBand(candidate, startBand: startBand)
+        let previousAtStart = isWithinReferenceStartBand(previous, startBand: startBand)
+
+        if candidateAtStart && !previousAtStart {
+            return true
+        }
+
+        if !candidateAtStart {
+            return false
+        }
+
+        return looksLikeNewReferenceEntry(candidate.text)
+    }
+
+    private func isWithinReferenceStartBand(
+        _ line: ReferenceLineCandidate,
+        startBand: ReferenceStartBand
+    ) -> Bool {
+        abs(line.bounds.minX - startBand.centerX) <= startBand.tolerance
     }
 
     /// Derives a human-readable citation label ("Graves, Wayne, and Danihelka 2014")
