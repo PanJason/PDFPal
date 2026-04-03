@@ -2110,6 +2110,18 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let bounds: CGRect
     }
 
+    private struct CollectedReferenceEntry {
+        let entry: String
+        let lineCandidates: [ReferenceLineCandidate]
+        let terminatedByBoundary: Bool
+    }
+
+    private struct ScoredReferenceEntry {
+        let entry: String
+        let score: Int
+        let collected: CollectedReferenceEntry
+    }
+
     private struct ReferenceStartBand {
         let centerX: CGFloat
         let tolerance: CGFloat
@@ -4323,10 +4335,13 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             page: page,
             point: point,
             labelText: labelText,
-            scoredEntries: scoredEntries
+            scoredEntries: scoredEntries.map { (entry: $0.entry, score: $0.score) }
         )
-        if let matchedEntry = scoredEntries.first(where: { $0.score > 0 })?.entry {
-            return matchedEntry
+        if let matchedEntry = scoredEntries.first(where: { $0.score > 0 }) {
+            return extendReferenceEntryForwardIfNeeded(
+                matchedEntry.collected,
+                seedPage: page
+            )
         }
 
         let seedPoint = point ?? CGPoint(
@@ -4371,14 +4386,18 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private func scoredReferenceEntries(
         for labelText: String,
         among lines: [ReferenceLineCandidate]
-    ) -> [(entry: String, score: Int)] {
+    ) -> [ScoredReferenceEntry] {
         guard !lines.isEmpty else { return [] }
         let fingerprint = citationLabelFingerprint(from: labelText)
         let startIndices = referenceEntryStartIndices(in: lines)
         return startIndices.map { startIndex in
-            let entry = collectReferenceEntry(startingAt: startIndex, from: lines)
-            let score = referenceEntryScore(entry, fingerprint: fingerprint)
-            return (entry: entry, score: score)
+            let collected = collectReferenceEntry(startingAt: startIndex, from: lines)
+            let score = referenceEntryScore(collected.entry, fingerprint: fingerprint)
+            return ScoredReferenceEntry(
+                entry: collected.entry,
+                score: score,
+                collected: collected
+            )
         }
         .sorted { lhs, rhs in
             lhs.score > rhs.score
@@ -4472,11 +4491,11 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         var bestScore = Int.min
 
         for startIndex in referenceEntryStartIndices(in: lines) {
-            let entry = collectReferenceEntry(startingAt: startIndex, from: lines)
-            let score = referenceEntryScore(entry, fingerprint: fingerprint)
+            let collected = collectReferenceEntry(startingAt: startIndex, from: lines)
+            let score = referenceEntryScore(collected.entry, fingerprint: fingerprint)
             if score > bestScore {
                 bestScore = score
-                bestEntry = entry
+                bestEntry = collected.entry
             }
         }
 
@@ -4496,8 +4515,10 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     private func collectReferenceEntry(
         startingAt startIndex: Int,
         from lines: [ReferenceLineCandidate]
-    ) -> String {
-        guard lines.indices.contains(startIndex) else { return "" }
+    ) -> CollectedReferenceEntry {
+        guard lines.indices.contains(startIndex) else {
+            return CollectedReferenceEntry(entry: "", lineCandidates: [], terminatedByBoundary: false)
+        }
 
         // In a numeric reference list ([1], [2], …) the continuation lines after
         // the opening bracket often start with author names which NLTagger would
@@ -4507,7 +4528,9 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let authorYearStartBand = numericStyle ? nil : authorYearReferenceStartBand(in: lines)
 
         var collected = [lines[startIndex].text]
+        var collectedCandidates = [lines[startIndex]]
         var nextIndex = startIndex + 1
+        var terminatedByBoundary = false
 
         while nextIndex < lines.count {
             let currentCandidate = lines[nextIndex - 1]
@@ -4525,13 +4548,21 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
                     )
                 } ?? looksLikeNewReferenceEntry(nextLine)
             }
-            if isNewEntry { break }
+            if isNewEntry {
+                terminatedByBoundary = true
+                break
+            }
             if collected.last == nextLine { break }
             collected.append(nextLine)
+            collectedCandidates.append(nextCandidate)
             nextIndex += 1
         }
 
-        return collected.joined(separator: " ")
+        return CollectedReferenceEntry(
+            entry: collected.joined(separator: " "),
+            lineCandidates: collectedCandidates,
+            terminatedByBoundary: terminatedByBoundary
+        )
     }
 
     private func referenceEntryStartIndices(in lines: [ReferenceLineCandidate]) -> [Int] {
@@ -4543,9 +4574,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         }
 
         if let startBand = authorYearReferenceStartBand(in: lines) {
-            let indices = lines.indices.filter {
-                isAuthorYearReferenceEntryStart(lines[$0], startBand: startBand)
-            }
+            let indices = lines.indices.filter { isWithinReferenceStartBand(lines[$0], startBand: startBand) }
             if !indices.isEmpty {
                 return indices
             }
@@ -4591,8 +4620,7 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         _ line: ReferenceLineCandidate,
         startBand: ReferenceStartBand
     ) -> Bool {
-        guard isWithinReferenceStartBand(line, startBand: startBand) else { return false }
-        return looksLikeNewReferenceEntry(line.text)
+        isWithinReferenceStartBand(line, startBand: startBand)
     }
 
     private func shouldStartNewAuthorYearReferenceEntry(
@@ -4619,6 +4647,198 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         startBand: ReferenceStartBand
     ) -> Bool {
         abs(line.bounds.minX - startBand.centerX) <= startBand.tolerance
+    }
+
+    private func extendReferenceEntryForwardIfNeeded(
+        _ collected: CollectedReferenceEntry,
+        seedPage: PDFPage
+    ) -> String {
+        guard !collected.entry.isEmpty,
+              !collected.terminatedByBoundary,
+              let lastLine = collected.lineCandidates.last,
+              referenceEntryMayContinuePastPageBottom(lastLine, on: seedPage),
+              let document
+        else {
+            return collected.entry
+        }
+
+        let seedPageIndex = document.index(for: seedPage)
+        guard seedPageIndex >= 0 else { return collected.entry }
+
+        if Self.citationDebugLoggingEnabled {
+            Swift.print("""
+            [citation-debug] extendReferenceEntryForward
+              seedPage=\(seedPageIndex) terminatedByBoundary=\(collected.terminatedByBoundary)
+              lastLineY=\(Int(lastLine.bounds.midY.rounded())) lastLineX=\(Int(lastLine.bounds.minX.rounded()))
+              seedEntry=\(debugCitationSnippet(collected.entry))
+            """)
+        }
+
+        var assembledParts = collected.lineCandidates.map(\.text)
+        var previousLine = lastLine
+        let seedNumericStyle = isNumericReferenceList(collected.lineCandidates)
+        let carriedStartX = collected.lineCandidates.map(\.bounds.minX).min()
+        let carriedTolerance = max(2.5, typographyMetrics(for: seedPage).lineHeight * 0.25)
+        var pageIndex = seedPageIndex + 1
+        var remainingPages = 3
+
+        while remainingPages > 0, pageIndex < document.pageCount,
+              let nextPage = document.page(at: pageIndex) {
+            let nextPageLines = topReferenceLines(on: nextPage)
+            if Self.citationDebugLoggingEnabled {
+                let preview = nextPageLines.prefix(8).map {
+                    "    y=\(Int($0.bounds.midY.rounded())) x=\(Int($0.bounds.minX.rounded())) \($0.text.prefix(70))"
+                }.joined(separator: "\n")
+                Swift.print("""
+                [citation-debug] extendReferenceEntryForward: page=\(pageIndex) topLines count=\(nextPageLines.count)
+                \(preview)
+                """)
+            }
+            guard !nextPageLines.isEmpty else {
+                if Self.citationDebugLoggingEnabled {
+                    Swift.print("[citation-debug] extendReferenceEntryForward: stop no top lines on page \(pageIndex)")
+                }
+                break
+            }
+
+            let numericStyle = seedNumericStyle || isNumericReferenceList(nextPageLines)
+            var appendedAny = false
+
+            for candidate in nextPageLines {
+                let beginsNewEntry: Bool
+                if numericStyle {
+                    beginsNewEntry = isNumericReferenceEntryStart(candidate.text)
+                } else if let carriedStartX {
+                    beginsNewEntry = shouldStartNewCrossPageAuthorYearEntry(
+                        candidate,
+                        after: previousLine,
+                        carriedStartX: carriedStartX,
+                        tolerance: carriedTolerance
+                    )
+                } else {
+                    beginsNewEntry = looksLikeNewReferenceEntry(candidate.text)
+                }
+
+                if beginsNewEntry {
+                    if Self.citationDebugLoggingEnabled {
+                        Swift.print("""
+                        [citation-debug] extendReferenceEntryForward: stop new entry on page \(pageIndex)
+                          lineY=\(Int(candidate.bounds.midY.rounded())) lineX=\(Int(candidate.bounds.minX.rounded()))
+                          line=\(debugCitationSnippet(candidate.text))
+                        """)
+                    }
+                    return joinCitationContextParts(assembledParts)
+                }
+
+                if assembledParts.last == candidate.text { continue }
+                assembledParts.append(candidate.text)
+                previousLine = candidate
+                appendedAny = true
+                if Self.citationDebugLoggingEnabled {
+                    Swift.print("""
+                    [citation-debug] extendReferenceEntryForward: append page \(pageIndex)
+                      lineY=\(Int(candidate.bounds.midY.rounded())) lineX=\(Int(candidate.bounds.minX.rounded()))
+                      line=\(debugCitationSnippet(candidate.text))
+                    """)
+                }
+            }
+
+            if !appendedAny {
+                if Self.citationDebugLoggingEnabled {
+                    Swift.print("[citation-debug] extendReferenceEntryForward: stop appended nothing on page \(pageIndex)")
+                }
+                break
+            }
+
+            if !referenceEntryMayContinuePastPageBottom(previousLine, on: nextPage) {
+                if Self.citationDebugLoggingEnabled {
+                    Swift.print("[citation-debug] extendReferenceEntryForward: stop no further continuation after page \(pageIndex)")
+                }
+                break
+            }
+
+            pageIndex += 1
+            remainingPages -= 1
+        }
+
+        if Self.citationDebugLoggingEnabled {
+            Swift.print("[citation-debug] extendReferenceEntryForward: final=\(debugCitationSnippet(joinCitationContextParts(assembledParts)))")
+        }
+        return joinCitationContextParts(assembledParts)
+    }
+
+    private func referenceEntryMayContinuePastPageBottom(
+        _ lastLine: ReferenceLineCandidate,
+        on page: PDFPage
+    ) -> Bool {
+        let bounds = page.bounds(for: .cropBox)
+        let metrics = typographyMetrics(for: page)
+        return lastLine.bounds.minY <= bounds.minY + metrics.lineSpacing * 6
+    }
+
+    private func topReferenceLines(on page: PDFPage) -> [ReferenceLineCandidate] {
+        let metrics = typographyMetrics(for: page)
+        let bounds = page.bounds(for: .cropBox)
+        let scanHeight = metrics.lineSpacing * 22
+        let headerInset = metrics.lineSpacing * 4
+        let rect = CGRect(
+            x: bounds.minX,
+            y: max(bounds.minY, bounds.maxY - scanHeight - headerInset),
+            width: bounds.width,
+            height: scanHeight
+        )
+        return referenceLines(in: rect, on: page)
+    }
+
+    private func referenceLines(
+        in rect: CGRect,
+        on page: PDFPage
+    ) -> [ReferenceLineCandidate] {
+        guard let selection = page.selection(for: rect) else { return [] }
+        let lines = selection.selectionsByLine()
+            .filter { $0.pages.first === page }
+            .compactMap { lineSelection -> ReferenceLineCandidate? in
+                guard let range = referenceLineRange(for: lineSelection, on: page) else {
+                    return nil
+                }
+                let text = cleanCitationText(lineSelection.string ?? "")
+                guard !text.isEmpty else { return nil }
+                let lineBounds = lineSelection.bounds(for: page)
+                return ReferenceLineCandidate(text: text, range: range, bounds: lineBounds)
+            }
+
+        let metrics = typographyMetrics(for: page)
+        return lines.sorted { lhs, rhs in
+            let dy = lhs.bounds.midY - rhs.bounds.midY
+            if abs(dy) > metrics.lineHeight * 0.3 {
+                return dy > 0
+            }
+            let dx = lhs.bounds.minX - rhs.bounds.minX
+            if abs(dx) > 1 {
+                return dx < 0
+            }
+            return lhs.range.location < rhs.range.location
+        }
+    }
+
+    private func shouldStartNewCrossPageAuthorYearEntry(
+        _ candidate: ReferenceLineCandidate,
+        after previous: ReferenceLineCandidate,
+        carriedStartX: CGFloat,
+        tolerance: CGFloat
+    ) -> Bool {
+        let candidateAtOrLeftOfStart = candidate.bounds.minX <= carriedStartX + tolerance
+        let previousAtOrLeftOfStart = previous.bounds.minX <= carriedStartX + tolerance
+
+        if !candidateAtOrLeftOfStart {
+            return false
+        }
+
+        if previousAtOrLeftOfStart {
+            return looksLikeNewReferenceEntry(candidate.text)
+        }
+
+        return true
     }
 
     /// Derives a human-readable citation label ("Graves, Wayne, and Danihelka 2014")
