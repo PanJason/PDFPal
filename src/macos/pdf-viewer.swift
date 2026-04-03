@@ -4057,18 +4057,43 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         }
 
         if fragmentTrimmed.range(of: #"^(19|20)\d{2}[a-z]?$"#, options: .regularExpression) != nil {
-            // Try 1: left context already contains a year → "Smith 2019, Jones 2020"
+            // Try 1: left context already contains a prior year → "Smith 2019, Jones 2020"
             if let authorPart = inheritedAuthorYearPrefix(from: leftContext)?.authorPart {
                 return cleanCitationText("\(authorPart)\(fragmentTrimmed)")
             }
-            // Try 2: left context ends with an author prefix but no year →
-            // "Vaswani et al." or "Smith," (the common case when only the year is linked)
+            // Try 2: left context ends with "et al." or a trailing comma →
+            // "Vaswani et al." or "Smith," (common when only the year is hyperlinked)
             if let authorPart = trailingAuthorCitationPrefix(from: leftContext) {
                 return cleanCitationText("\(authorPart) \(fragmentTrimmed)")
             }
-            // Try 3: NLTagger on the left context — pick the name closest to the year.
-            if let lastName = extractPersonLastNames(from: leftContext).last {
-                return "\(lastName) \(fragmentTrimmed)"
+            // Try 3: NLTagger on the left context.
+            // Strategy: use the FIRST found name unless a year appears between the
+            // first and last name (which signals multiple consecutive citations, e.g.
+            // "Graves 2014, Wayne 2016, and Smith"), in which case use the LAST name.
+            let nlNames = extractPersonLastNames(from: leftContext)
+            if !nlNames.isEmpty {
+                let chosenName: String
+                if nlNames.count >= 2,
+                   let firstRange = leftContext.range(of: nlNames[0]),
+                   let lastRange  = leftContext.range(of: nlNames[nlNames.count - 1]),
+                   firstRange.upperBound < lastRange.lowerBound {
+                    let between = String(leftContext[firstRange.upperBound..<lastRange.lowerBound])
+                    let hasPriorYear = between.range(
+                        of: #"(19|20)\d{2}"#, options: .regularExpression
+                    ) != nil
+                    chosenName = hasPriorYear ? nlNames[nlNames.count - 1] : nlNames[0]
+                } else {
+                    chosenName = nlNames[0]
+                }
+                return "\(chosenName) \(fragmentTrimmed)"
+            }
+            // Try 4: NLTagger found nothing (e.g. non-ASCII / umlaut names).
+            // Grab the last capitalized word token immediately before the year link;
+            // this is the closest author name to the citation anchor.
+            if let match = citationRegexMatch(
+                #"([A-Z][A-Za-z\u00C0-\u024F''\-]{2,})\s*$"#, in: leftContext
+            ), match.count > 1 {
+                return "\(match[1]) \(fragmentTrimmed)"
             }
         }
 
