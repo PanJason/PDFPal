@@ -2094,8 +2094,13 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     }
 
     private struct CitationLabelFingerprint {
-        let authorToken: String?
+        let authorHints: [CitationAuthorHint]
         let yearToken: String?
+    }
+
+    private struct CitationAuthorHint: Equatable {
+        let surname: String
+        let initials: [String]
     }
 
     private struct ReferenceLineCandidate {
@@ -3834,16 +3839,16 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             return layout
         }
 
-        // Collect the left edge of every substantial line (width > 10 % of page).
+        // Collect the bounds of every substantial line (width > 10 % of page).
         let minLineWidth = pageBounds.width * 0.1
-        let xStarts: [CGFloat] = selection
+        let lineBounds: [CGRect] = selection
             .selectionsByLine()
             .filter { $0.pages.first === page }
-            .compactMap { line -> CGFloat? in
+            .compactMap { line -> CGRect? in
                 let b = line.bounds(for: page)
-                return b.width > minLineWidth ? b.minX : nil
+                return b.width > minLineWidth ? b : nil
             }
-            .sorted()
+        let xStarts = lineBounds.map(\.minX).sorted()
 
         guard xStarts.count >= 6 else {
             let layout = ColumnLayout(columns: [fullRange])
@@ -3856,7 +3861,18 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         var splitPoints: [CGFloat] = []
         for (a, b) in zip(xStarts, xStarts.dropFirst()) {
             if b - a > gapThreshold {
-                splitPoints.append((a + b) / 2)
+                let split = (a + b) / 2
+                // Keep only true gutter-like gaps. Hanging-indent reference lists
+                // can create large start-X gaps even though most lines visually
+                // span across that position; those are not real column breaks.
+                let bridgePadding = min(pageBounds.width * 0.02, typographyMetrics(for: page).emWidth * 2)
+                let crossingLineCount = lineBounds.filter { bounds in
+                    bounds.minX + bridgePadding < split && bounds.maxX - bridgePadding > split
+                }.count
+                let maxCrossingLines = max(1, Int((Double(lineBounds.count) * 0.08).rounded(.up)))
+                if crossingLineCount <= maxCrossingLines {
+                    splitPoints.append(split)
+                }
             }
         }
 
@@ -4561,13 +4577,9 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             in: cleaned
         )?.dropFirst().first.map { String($0) }
 
-        // Use NLTagger to find personal names in document order; take the first
-        // (i.e. the first-listed author’s last name) as the fingerprint token.
-        // Fall back to the old regex cascade only when NLTagger finds nothing —
-        // this handles edge cases such as bracket-style labels "[Graves14]".
-        var authorToken = extractPersonLastNames(from: cleaned).first?.lowercased()
+        var authorHints = extractCitationAuthorHints(from: cleaned)
 
-        if authorToken == nil {
+        if authorHints.isEmpty {
             let authorPatterns = [
                 #"([A-Z][A-Za-z’’\-]+)\s+et al\."#,
                 #"([A-Z][A-Za-z’’\-]+),"#,
@@ -4575,18 +4587,23 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
             ]
             for pattern in authorPatterns {
                 if let match = citationRegexMatch(pattern, in: cleaned), match.count > 1 {
-                    authorToken = match[1].lowercased()
+                    authorHints = [
+                        CitationAuthorHint(surname: match[1].lowercased(), initials: [])
+                    ]
                     break
                 }
             }
         }
 
         if Self.citationDebugLoggingEnabled {
-            Swift.print("[citation-debug] citationLabelFingerprint(\"\(cleaned)\") → author=\(authorToken ?? "nil"), year=\(yearToken ?? "nil")")
+            let authorSummary = authorHints.isEmpty
+                ? "nil"
+                : authorHints.map(authorHintDebugSummary).joined(separator: " | ")
+            Swift.print("[citation-debug] citationLabelFingerprint(\"\(cleaned)\") → authors=\(authorSummary), year=\(yearToken ?? "nil")")
         }
 
         return CitationLabelFingerprint(
-            authorToken: authorToken,
+            authorHints: authorHints,
             yearToken: yearToken?.lowercased()
         )
     }
@@ -4600,12 +4617,9 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
 
         var score = 0
 
-        if let authorToken = fingerprint.authorToken {
-            if normalizedEntry.range(of: "\\b\(NSRegularExpression.escapedPattern(for: authorToken))\\b", options: .regularExpression) != nil {
-                score += 5
-            } else {
-                score -= 4
-            }
+        if !fingerprint.authorHints.isEmpty {
+            let authorScore = referenceEntryAuthorScore(entry, fingerprint: fingerprint)
+            score += authorScore
         }
 
         if let yearToken = fingerprint.yearToken {
@@ -4623,6 +4637,221 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         }
 
         return score
+    }
+
+    private func extractCitationAuthorHints(from labelText: String) -> [CitationAuthorHint] {
+        guard !labelText.isEmpty else { return [] }
+        let authorPart = citationLabelAuthorPart(from: labelText)
+        return splitAuthorFragments(authorPart)
+            .compactMap(parseAuthorHint(from:))
+            .prefix(4)
+            .map { $0 }
+    }
+
+    private func citationLabelAuthorPart(from labelText: String) -> String {
+        let trimmed = cleanCitationText(labelText)
+        guard !trimmed.isEmpty else { return "" }
+
+        var authorPart = trimmed
+        if let yearRange = trimmed.range(
+            of: #"(?:19|20)\d{2}[a-z]?"#,
+            options: .regularExpression
+        ) {
+            authorPart = String(trimmed[..<yearRange.lowerBound])
+        }
+
+        authorPart = authorPart.replacingOccurrences(
+            of: #"[\(\)\[\]]"#,
+            with: " ",
+            options: .regularExpression
+        )
+        authorPart = authorPart.replacingOccurrences(
+            of: #"\bet al\.?"#,
+            with: "",
+            options: .regularExpression
+        )
+        return cleanCitationText(authorPart)
+    }
+
+    private func splitAuthorFragments(_ text: String) -> [String] {
+        let separators = try? NSRegularExpression(pattern: #"\s*,\s*(?:and\s+)?|\s+and\s+|\s*;\s*"#)
+        let nsText = text as NSString
+        let matches = separators?.matches(in: text, range: NSRange(location: 0, length: nsText.length)) ?? []
+
+        var ranges: [NSRange] = []
+        var start = 0
+        for match in matches {
+            ranges.append(NSRange(location: start, length: match.range.location - start))
+            start = NSMaxRange(match.range)
+        }
+        ranges.append(NSRange(location: start, length: nsText.length - start))
+
+        return ranges.compactMap { range -> String? in
+            let fragment = nsText.substring(with: range)
+            let cleaned = cleanCitationText(fragment)
+            return cleaned.isEmpty ? nil : cleaned
+        }
+    }
+
+    private func parseAuthorHint(from fragment: String) -> CitationAuthorHint? {
+        var cleaned = fragment.replacingOccurrences(
+            of: #"\bet al\.?"#,
+            with: "",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"[^A-Za-z\u00C0-\u024F'’.\- ]+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        cleaned = cleanCitationText(cleaned)
+        guard !cleaned.isEmpty else { return nil }
+
+        let rawTokens = cleaned
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+        guard !rawTokens.isEmpty else { return nil }
+
+        let normalizedTokens = rawTokens.compactMap(normalizedAuthorToken(from:))
+        guard let surname = normalizedTokens.last?.lowercased(), !surname.isEmpty else {
+            return nil
+        }
+
+        let initials = rawTokens.dropLast().flatMap(initialsFromAuthorToken)
+        return CitationAuthorHint(surname: surname, initials: initials)
+    }
+
+    private func normalizedAuthorToken(from token: String) -> String? {
+        let stripped = token.replacingOccurrences(
+            of: #"[^A-Za-z\u00C0-\u024F'’\-]+"#,
+            with: "",
+            options: .regularExpression
+        )
+        return stripped.isEmpty ? nil : stripped
+    }
+
+    private func initialsFromAuthorToken(_ token: String) -> [String] {
+        let letters = token.unicodeScalars.filter {
+            CharacterSet.letters.contains($0)
+        }.map { String($0).lowercased() }
+        guard !letters.isEmpty else { return [] }
+
+        if token.contains(".") || letters.count <= 2 {
+            return letters
+        }
+        return [letters[0]]
+    }
+
+    private func referenceEntryAuthorScore(
+        _ entry: String,
+        fingerprint: CitationLabelFingerprint
+    ) -> Int {
+        let candidateAuthors = extractReferenceAuthorHints(from: entry)
+        if candidateAuthors.isEmpty {
+            guard let firstAuthor = fingerprint.authorHints.first else { return 0 }
+            let normalizedEntry = cleanCitationText(entry).lowercased()
+            if normalizedEntry.range(
+                of: "\\b\(NSRegularExpression.escapedPattern(for: firstAuthor.surname))\\b",
+                options: .regularExpression
+            ) != nil {
+                return 3
+            }
+            return -3
+        }
+
+        var score = 0
+        for (index, expected) in fingerprint.authorHints.prefix(4).enumerated() {
+            let weight = max(1, 4 - index)
+            guard candidateAuthors.indices.contains(index) else {
+                score -= 2 * weight
+                continue
+            }
+
+            let candidate = candidateAuthors[index]
+            guard candidate.surname == expected.surname else {
+                score -= 5 * weight
+                break
+            }
+
+            score += 4 * weight
+            score += initialsMatchScore(expected: expected.initials, candidate: candidate.initials) * weight
+        }
+
+        return score
+    }
+
+    private func extractReferenceAuthorHints(from referenceText: String) -> [CitationAuthorHint] {
+        let stripped = referenceText.replacingOccurrences(
+            of: #"^\s*\[?\d{1,3}[\].]\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        let authorBlock = leadingReferenceAuthorBlock(from: stripped)
+        guard !authorBlock.isEmpty else { return [] }
+
+        return splitAuthorFragments(authorBlock)
+            .compactMap(parseAuthorHint(from:))
+            .prefix(8)
+            .map { $0 }
+    }
+
+    private func leadingReferenceAuthorBlock(from referenceText: String) -> String {
+        let trimmed = cleanCitationText(referenceText)
+        guard !trimmed.isEmpty else { return "" }
+
+        var candidateEnd = trimmed.endIndex
+
+        let delimiterPatterns = [
+            #"[\"“]"#,
+            #"\bIn:"#,
+            #"(?:19|20)\d{2}"#
+        ]
+
+        for pattern in delimiterPatterns {
+            if let range = trimmed.range(of: pattern, options: .regularExpression),
+               range.lowerBound < candidateEnd {
+                candidateEnd = range.lowerBound
+            }
+        }
+
+        var authorBlock = String(trimmed[..<candidateEnd])
+        authorBlock = authorBlock.replacingOccurrences(
+            of: #"\bet al\.?"#,
+            with: "",
+            options: .regularExpression
+        )
+        authorBlock = authorBlock.replacingOccurrences(
+            of: #"\.$"#,
+            with: "",
+            options: .regularExpression
+        )
+        return cleanCitationText(authorBlock)
+    }
+
+    private func initialsMatchScore(expected: [String], candidate: [String]) -> Int {
+        guard !expected.isEmpty else { return 1 }
+        guard !candidate.isEmpty else { return 0 }
+        if candidate.starts(with: expected) || expected.starts(with: candidate) {
+            return 3
+        }
+
+        let prefixMatchCount = zip(expected, candidate).prefix { lhs, rhs in
+            lhs == rhs
+        }.count
+
+        if prefixMatchCount > 0 {
+            return prefixMatchCount
+        }
+
+        return -3
+    }
+
+    private func authorHintDebugSummary(_ hint: CitationAuthorHint) -> String {
+        if hint.initials.isEmpty {
+            return hint.surname
+        }
+        return "\(hint.surname)(\(hint.initials.joined()))"
     }
 
     private func debugLogCitationResolution(
