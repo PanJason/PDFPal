@@ -3657,19 +3657,24 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let sourceBounds = cluster.reduce(annotation.bounds) { partialResult, item in
             partialResult.union(item.bounds)
         }
-        let labelText = resolvedCitationLabel(
+        let rawLabel = resolvedCitationLabel(
             from: cluster,
             primaryAnnotation: annotation,
             on: page
         )
-        guard !labelText.isEmpty else { return nil }
+        guard !rawLabel.isEmpty else { return nil }
         let referenceText = destinationPage.map {
             referenceContextText(
                 around: destinationPoint,
                 on: $0,
-                matching: labelText
+                matching: rawLabel
             )
         }
+
+        // If we found a bibliography entry, derive a canonical label from it
+        // (e.g. "Graves, Wayne, and Danihelka 2014") instead of relying on the
+        // potentially-fragmented annotation-bounds text.
+        let labelText = referenceText.flatMap { deriveLabelFromReference($0) } ?? rawLabel
 
         debugLogCitationResolution(
             labelText: labelText,
@@ -4241,6 +4246,32 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         }
 
         return collected.joined(separator: " ")
+    }
+
+    /// Derives a human-readable citation label ("Graves, Wayne, and Danihelka 2014")
+    /// directly from a bibliography entry string, using NLTagger to find all author
+    /// last names and a year regex.  Returns `nil` when neither names nor a year
+    /// can be extracted (so the call-site can fall back to the raw annotation label).
+    private func deriveLabelFromReference(_ referenceText: String) -> String? {
+        guard !referenceText.isEmpty else { return nil }
+
+        let lastNames = extractPersonLastNames(from: referenceText)
+        let year = citationRegexMatch(#"((?:19|20)\d{2})[^0-9]"#, in: referenceText)?
+            .dropFirst().first.map { String($0) } ?? ""
+
+        guard !lastNames.isEmpty || !year.isEmpty else { return nil }
+
+        let authorPart: String
+        switch lastNames.count {
+        case 0:  authorPart = ""
+        case 1:  authorPart = "\(lastNames[0]) "
+        case 2:  authorPart = "\(lastNames[0]) and \(lastNames[1]) "
+        case 3:  authorPart = "\(lastNames[0]), \(lastNames[1]), and \(lastNames[2]) "
+        default: authorPart = "\(lastNames[0]) et al. "
+        }
+
+        let label = (authorPart + year).trimmingCharacters(in: .whitespaces)
+        return label.isEmpty ? nil : label
     }
 
     /// Extracts personal-name tokens from `text` using NLTagger, returning the
