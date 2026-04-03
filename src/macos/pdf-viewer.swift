@@ -3894,10 +3894,32 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
         let rhsText = cleanCitationText(citationLabelText(for: rhs, on: page))
         guard !lhsText.isEmpty, !rhsText.isEmpty else { return false }
 
-        let rhsLooksLikeContinuation = rhsText.range(
-            of: #"^(?:et\b|al\b|and\b|[a-z]|[,;.)]|(?:19|20)\d{2}[a-z]?)"#,
-            options: .regularExpression
-        ) != nil
+        // A fragment is a continuation if it starts with a person name (NLTagger),
+        // a lowercase continuation word, or a year/punctuation token.
+        let rhsLooksLikeContinuation: Bool = {
+            // Fast regex path for common tokens.
+            if rhsText.range(
+                of: #"^(?:et\b|al\b|and\b|[a-z]|[,;.)]|(?:19|20)\d{2}[a-z]?)"#,
+                options: .regularExpression
+            ) != nil { return true }
+            // NLTagger path: handles "van den Berg", "de la", non-ASCII names, etc.
+            let probe = String(rhsText.prefix(60))
+            let tagger = NLTagger(tagSchemes: [.nameType])
+            tagger.string = probe
+            var foundName = false
+            tagger.enumerateTags(
+                in: probe.startIndex..<probe.endIndex,
+                unit: .word,
+                scheme: .nameType,
+                options: [.omitWhitespace, .joinNames]
+            ) { tag, range in
+                if tag == .personalName, range.lowerBound == probe.startIndex {
+                    foundName = true
+                }
+                return false
+            }
+            return foundName
+        }()
         let lhsLooksComplete = looksLikeCitationLabel(lhsText)
 
         return rhsLooksLikeContinuation && !lhsLooksComplete
