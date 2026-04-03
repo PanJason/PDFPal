@@ -4440,20 +4440,42 @@ final class PDFKitView: PDFView, NSMenuItemValidation {
     }
 
     private func looksLikeNewReferenceEntry(_ text: String) -> Bool {
-        let patterns = [
-            #"^[A-Z][A-Za-z'’\-]+,\s*[A-Z]"#,
-            #"^[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+)*,\s*(?:[A-Z]\.)"#,
-            #"^[A-Z][A-Za-z0-9 .,&'’\-]+?\.\s*(19|20)\d{2}[a-z]?\."#,
-            #"^(?:[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+)+,\s*){2,}"#,
-            #"^(?:[A-Z]\.\s*)?[A-Z][A-Za-z'’\-]+,\s+(?:[A-Z][A-Za-z'’\-]+\s+){1,3}[A-Z][A-Za-z'’\-]+(?:,\s*(?:and\s+)?){1}"#
-        ]
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
 
-        for pattern in patterns {
-            if text.range(of: pattern, options: .regularExpression) != nil {
-                return true
-            }
+        // Numeric / bracketed list markers: [1], 1., etc.
+        if trimmed.range(of: #"^\[?\d+[\].]"#, options: .regularExpression) != nil {
+            return true
         }
-        return false
+
+        // Ask NLTagger whether the line opens with a personal-name entity.
+        // Probe only the first 80 characters to keep the call fast.
+        let probe = String(trimmed.prefix(80))
+        let tagger = NLTagger(tagSchemes: [.nameType])
+        tagger.string = probe
+        var startsWithPersonName = false
+        tagger.enumerateTags(
+            in: probe.startIndex..<probe.endIndex,
+            unit: .word,
+            scheme: .nameType,
+            options: [.omitWhitespace, .joinNames]
+        ) { tag, range in
+            if tag == .personalName, range.lowerBound == probe.startIndex {
+                startsWithPersonName = true
+            }
+            return false  // stop after first entity
+        }
+        if startsWithPersonName { return true }
+
+        // Regex fallback for styles that begin with initials or punctuation
+        // before the first taggable name (e.g. "A. Graves, G. Wayne …").
+        let fallbackPatterns = [
+            #"^[A-Z][A-Za-z’’\-]+,\s*[A-Z]"#,
+            #"^[A-Z][A-Za-z0-9 .,&’’\-]+?\.\s*(19|20)\d{2}[a-z]?\."#,
+        ]
+        return fallbackPatterns.contains {
+            trimmed.range(of: $0, options: .regularExpression) != nil
+        }
     }
 
     private func looksLikeCitationLabel(_ text: String) -> Bool {
